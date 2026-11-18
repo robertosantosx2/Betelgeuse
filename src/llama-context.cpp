@@ -3371,6 +3371,13 @@ llama_context::llama_context(
         }
 
         
+        // A stripped dense GGUF has no usable routed-expert payloads. Never
+        // fall back to reads from that file if pager setup or pack activation fails.
+        if (model.stripped_experts &&
+                (!cparams.moe_direct_io || !cparams.moe_gguf_path || !cparams.moe_pack_dir)) {
+            throw std::runtime_error("stripped expert model requires --moe-direct-io and a valid --moe-pack-dir");
+        }
+
         if (cparams.moe_direct_io && cparams.moe_gguf_path && hparams.dsv4_hc_mult > 0) {
             moe_init_ring();
         }
@@ -3384,6 +3391,9 @@ llama_context::llama_context(
 
             std::string perr;
             if (!pager.init(cparams.moe_gguf_path, n_layer, n_exp, n_used, perr)) {
+                if (model.stripped_experts) {
+                    throw std::runtime_error("cannot initialize pager for stripped expert model: " + perr);
+                }
                 LLAMA_LOG_WARN("%s: moe_direct_io OFF: %s\n", __func__, perr.c_str());
             } else {
                 if (cparams.moe_pack_dir) {
@@ -3392,6 +3402,9 @@ llama_context::llama_context(
                     std::string idx = dir + "/native_experts.txt";
                     std::string e2;
                     if (!pager.use_pack(bin.c_str(), idx.c_str(), e2)) {
+                        if (model.stripped_experts) {
+                            throw std::runtime_error("cannot activate native expert pack for stripped model: " + e2);
+                        }
                         LLAMA_LOG_WARN("%s: moe pack OFF: %s\n", __func__, e2.c_str());
                     } else {
                         LLAMA_LOG_INFO("%s: moe pack ON: one blob read per expert (%d layers x %d experts)\n",
