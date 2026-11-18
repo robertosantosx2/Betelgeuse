@@ -156,16 +156,15 @@ jobs:
   windows:
     runs-on: windows-2025
 
-    steps:
-      - name: Install SVG rasterizer
-        run: choco install rsvg-convert --yes --no-progress
-
     cache-mode: write
     permissions:
       actions: write
       contents: read
 
     steps:
+      - name: Install SVG rasterizer
+        run: choco install rsvg-convert --yes --no-progress
+
       - name: Clone
         id: checkout
         uses: actions/checkout@v6
