@@ -68,14 +68,14 @@ static bool verify_pack_index_rejections(moe_pager & pager, const char * experts
 
     std::vector<size_t> data_rows;
     for (size_t i = 0; i < lines.size(); ++i) {
-        const size_t first = lines[i].find_first_not_of(" \\t\\r");
+        const size_t first = lines[i].find_first_not_of(" \t\r");
         if (first != std::string::npos && lines[i][first] != '#') data_rows.push_back(i);
     }
     if (data_rows.size() < 2) return false;
 
     auto join_lines = [](const std::vector<std::string> & source) {
         std::string result;
-        for (const auto & item : source) result += item + "\\n";
+        for (const auto & item : source) result += item + "\n";
         return result;
     };
     auto reject_index = [&](const char * label, const std::vector<std::string> & bad_lines) {
@@ -85,7 +85,7 @@ static bool verify_pack_index_rejections(moe_pager & pager, const char * experts
         const bool rejected = !pager.use_pack(experts_bin, temporary.c_str(), error) &&
                               !pager.pack_mode() && pager.pack_fd() < 0;
         unlink(temporary.c_str());
-        printf("  malformed-index %-18s %s (%s)\\n", label, rejected ? "PASS" : "FAIL", error.c_str());
+        printf("  malformed-index %-18s %s (%s)\n", label, rejected ? "PASS" : "FAIL", error.c_str());
         return rejected;
     };
 
@@ -130,7 +130,7 @@ static bool verify_pack_index_rejections(moe_pager & pager, const char * experts
     if (stat(experts_bin, &source_stat) != 0 || source_stat.st_size <= 1) return false;
     std::string pattern = std::string(experts_bin) + ".truncated-XXXXXX";
     std::vector<char> writable(pattern.begin(), pattern.end());
-    writable.push_back('\\0');
+    writable.push_back('\0');
     const int truncated_fd = mkstemp(writable.data());
     if (truncated_fd < 0) return false;
     const bool truncated_created = ftruncate(truncated_fd, source_stat.st_size - 1) == 0;
@@ -141,7 +141,7 @@ static bool verify_pack_index_rejections(moe_pager & pager, const char * experts
     const bool truncated_rejected = !pager.use_pack(truncated_path.c_str(), index_txt, error) &&
                                     !pager.pack_mode() && pager.pack_fd() < 0;
     unlink(truncated_path.c_str());
-    printf("  malformed-pack  truncated-file    %s (%s)\\n",
+    printf("  malformed-pack  truncated-file    %s (%s)\n",
            truncated_rejected ? "PASS" : "FAIL", error.c_str());
     ok &= truncated_rejected;
     return ok;
@@ -167,7 +167,7 @@ int main(int argc, char ** argv) {
     }
     if (argc == 8) {
         if (!verify_pack_index_rejections(pager, argv[5], argv[6])) {
-            fprintf(stderr, "FAIL: malformed pack/index rejection regression\\n");
+            fprintf(stderr, "FAIL: malformed pack/index rejection regression\n");
             return 1;
         }
         if (!pager.use_pack(argv[5], argv[6], err)) {
