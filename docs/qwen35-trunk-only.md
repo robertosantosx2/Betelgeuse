@@ -53,6 +53,21 @@ The dense GGUF retains original tensor descriptors for all 40 trunk expert tenso
 
 Do not load this stripped dense GGUF with upstream llama.cpp or a Betelgeuse build without the native pager.
 
+## Native pager byte-check
+
+The CUDA build also produces `build/bin/test_moe_pager`. The test accepts an optional pack/index pair and an unstripped source GGUF as an independent byte reference. After building the bundle, run:
+
+```bash
+build/bin/test_moe_pager \
+  /path/to/Qwen3.5-35B-A3B-Betelgeuse/Qwen3.5-35B-A3B-Dense.gguf \
+  40 256 8 \
+  /path/to/Qwen3.5-35B-A3B-Betelgeuse/experts.bin \
+  /path/to/Qwen3.5-35B-A3B-Betelgeuse/native_experts.txt \
+  /path/to/original/Qwen_Qwen3.5-35B-A3B-IQ2_XXS.gguf
+```
+
+This initializes the pager against the stripped dense GGUF with 40 trunk layers, switches it to pack mode, and compares its synchronous, prefetch, and batch reads against the corresponding slices in the original GGUF. It exercises the pager data path; it does not run model inference or validate graph scheduling.
+
 ## Validation status
 
 The regression suite synthesizes a 41-layer / 256-expert GGUF and checks:
