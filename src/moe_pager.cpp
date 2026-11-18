@@ -213,7 +213,14 @@ bool moe_pager::init(const char * gguf_path, int n_layer, int n_expert, int n_us
             if (sfd_buf >= 0) posix_fadvise(sfd_buf, 0, 0, POSIX_FADV_RANDOM);
             int sfd = open(spath.c_str(), O_RDONLY | O_DIRECT);
             if (sfd < 0) sfd = sfd_buf;
-            if (sfd >= 0) fds_.push_back(sfd);
+            if (sfd < 0) {
+                gguf_free(sctx);
+                err = "open split GGUF shard failed";
+                for (auto & shd : shards) if (shd.owned) gguf_free(shd.ctx);
+                gguf_free(gctx);
+                return false;
+            }
+            fds_.push_back(sfd);
             if (sfd_buf >= 0 && sfd_buf != sfd) fds_.push_back(sfd_buf);
             shards.push_back({spath, sctx, (int64_t) gguf_get_data_offset(sctx), sfd_buf >= 0 ? sfd_buf : sfd, sfd_buf, true});
         }
