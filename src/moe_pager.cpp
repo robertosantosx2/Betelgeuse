@@ -314,11 +314,11 @@ bool moe_pager::use_pack(const char * experts_bin, const char * index_txt, std::
         return false;
     }
     const uint64_t pack_size = (uint64_t) pack_stat.st_size;
-    const size_t n_entries = (size_t) n_layer_ * (size_t) n_expert_ * 3;
     if ((size_t) n_layer_ > SIZE_MAX / (size_t) n_expert_ / 3) {
         err = "pack index dimensions overflow";
         return false;
     }
+    const size_t n_entries = (size_t) n_layer_ * (size_t) n_expert_ * 3;
 
     // Build into temporaries: a rejected pack leaves the GGUF index and the
     // pager's active file descriptors untouched.
@@ -387,7 +387,8 @@ bool moe_pager::use_pack(const char * experts_bin, const char * index_txt, std::
                 err = "aligned pack read exceeds experts.bin or pager limits";
                 return false;
             }
-            if (pre + g > UINT32_MAX || pre + g + u > UINT32_MAX) {
+            if (g > (size_t) (UINT32_MAX - pre) ||
+                u > (size_t) (UINT32_MAX - pre - g)) {
                 err = "pack source offsets exceed pager limits";
                 return false;
             }
@@ -472,9 +473,13 @@ int moe_pager::submit_(int key, bool demand) {
     for (int r = 0; r < nread; r++) {
         struct io_uring_sqe * sqe = io_uring_get_sqe((struct io_uring *) ring_);
         while (!sqe) {
-            io_uring_submit((struct io_uring *) ring_);
+            int submitted = io_uring_submit((struct io_uring *) ring_);
+            if (submitted == -EINTR) continue;
+            if (submitted <= 0) GGML_ABORT("MoE pager could not submit queued reads: %d", submitted);
             struct io_uring_cqe * cqe = nullptr;
-            if (io_uring_wait_cqe((struct io_uring *) ring_, &cqe) == 0) {
+            const int wait_status = io_uring_wait_cqe((struct io_uring *) ring_, &cqe);
+            if (wait_status < 0) GGML_ABORT("MoE pager completion wait failed: %d", wait_status);
+            if (cqe) {
                 const uint64_t ud = cqe->user_data;
                 const int res = cqe->res;
                 io_uring_cqe_seen((struct io_uring *) ring_, cqe);
@@ -497,8 +502,11 @@ int moe_pager::submit_(int key, bool demand) {
     Req q; q.il = il; q.e = e; q.stage = st; q.done = pending; q.used = true; q.demand = demand;
     q.got[0] = got_self[0]; q.got[1] = got_self[1]; q.got[2] = got_self[2];
     reqs_.push_back(q);
-    int nsub = io_uring_submit((struct io_uring *) ring_);
-    if (nsub <= 0) { fprintf(stderr, "pager submit failed il=%d e=%d nsub=%d\n", il, e, nsub); }
+    while (io_uring_sq_ready((struct io_uring *) ring_) > 0) {
+        const int nsub = io_uring_submit((struct io_uring *) ring_);
+        if (nsub == -EINTR) continue;
+        if (nsub <= 0) GGML_ABORT("MoE pager submission failed il=%d e=%d: %d", il, e, nsub);
+    }
     if (pack_mode_) { io_ops_ += 1; io_bytes_ += (long) boff; n_pack_reads_ += 1; }
     else            { io_ops_ += 3; io_bytes_ += (long) boff; n_gguf_reads_ += 3; }
     return (int) reqs_.size() - 1;
