@@ -33,7 +33,8 @@ class TestQwen35TrunkPack(unittest.TestCase):
         writer.add_tensor("token_embd.weight", np.arange(16, dtype=np.float32).reshape(4, 4))
         for layer in range(41):
             for role in ("gate", "up", "down"):
-                values = np.full((2, 2, 256), layer + (0 if role == "gate" else 1), dtype=np.float32)
+                shape = (2, 4, 256) if role == "down" else (4, 2, 256)
+                values = np.full(shape, layer + (0 if role == "gate" else 1), dtype=np.float32)
                 writer.add_tensor(f"blk.{layer}.ffn_{role}_exps.weight", values)
         writer.write_header_to_file()
         writer.write_kv_data_to_file()
