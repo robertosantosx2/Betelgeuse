@@ -66,7 +66,7 @@ jobs:
         id: build_depends
         run: |
           sudo apt update
-          sudo apt install -y build-essential libssl-dev git-lfs libjpeg-dev python3 python3-venv python3-pip
+          sudo apt install -y build-essential libssl-dev git-lfs libjpeg-dev librsvg2-bin python3 python3-venv python3-pip
 
       - name: Python Dependencies
         id: python_depends
@@ -114,6 +114,10 @@ jobs:
 
   windows:
     runs-on: windows-2025
+
+    steps:
+      - name: Install SVG rasterizer
+        run: choco install rsvg-convert --yes --no-progress
 
     cache-mode: write
     permissions:
