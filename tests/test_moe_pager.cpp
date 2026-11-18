@@ -43,12 +43,30 @@ int main(int argc, char ** argv) {
     const int NL = argc > 2 ? atoi(argv[2]) : 48;
     const int NE = argc > 3 ? atoi(argv[3]) : 512;
     const int NU = argc > 4 ? atoi(argv[4]) : 10;
+    if (argc > 5 && argc != 8) {
+        fprintf(stderr, "usage: %s [GGUF [layers experts used [experts.bin index.txt reference.gguf]]]\n", argv[0]);
+        return 2;
+    }
 
     moe_pager pager;
+    moe_pager reference_pager;
+    moe_pager * source_pager = &pager;
     std::string err;
     if (!pager.init(model_path, NL, NE, NU, err)) {
         fprintf(stderr, "FAIL: pager.init(%s): %s\n", model_path, err.c_str());
         return 1;
+    }
+    if (argc == 8) {
+        if (!pager.use_pack(argv[5], argv[6], err)) {
+            fprintf(stderr, "FAIL: pager.use_pack(%s): %s\n", argv[5], err.c_str());
+            return 1;
+        }
+        if (!reference_pager.init(argv[7], NL, NE, NU, err)) {
+            fprintf(stderr, "FAIL: reference pager.init(%s): %s\n", argv[7], err.c_str());
+            return 1;
+        }
+        source_pager = &reference_pager;
+        printf("pack mode: experts=%s index=%s reference=%s\n", argv[5], argv[6], argv[7]);
     }
     printf("pager: layers=%d experts=%d used=%d bytes/expert=%zu (%.3f MiB)\n",
            pager.n_layer(), pager.n_expert(), pager.n_used(),
@@ -71,7 +89,7 @@ int main(int argc, char ** argv) {
     cudaMemset(d_dst, 0, 3 * biggest);
     for (auto & pr : probes) {
         const int il = pr[0], e = pr[1];
-        const moe_expert_slice * sl = pager.slices(il, e);
+        const moe_expert_slice * sl = source_pager->slices(il, e);
         size_t want[3];
         for (int r = 0; r < 3; r++) want[r] = pager.expert_role_bytes(il, r);
         void *dg = d_dst, *du = d_dst + want[0], *dd = d_dst + want[0] + want[1];
@@ -106,7 +124,7 @@ int main(int argc, char ** argv) {
         }
         for (auto & pr : aprobes) {
             const int il = pr[0], e = pr[1];
-            const moe_expert_slice * sl = pager.slices(il, e);
+            const moe_expert_slice * sl = source_pager->slices(il, e);
             size_t want[3];
             for (int r = 0; r < 3; r++) want[r] = pager.expert_role_bytes(il, r);
             // destination sized generously; commit only writes want[] bytes
@@ -141,7 +159,7 @@ int main(int argc, char ** argv) {
     {
         const int layer = NL / 2;
         const int expert = NE / 3;
-        const moe_expert_slice * slices = pager.slices(layer, expert);
+        const moe_expert_slice * slices = source_pager->slices(layer, expert);
         const size_t gate_bytes = pager.expert_role_bytes(layer, 0);
         const size_t up_bytes   = pager.expert_role_bytes(layer, 1);
         const size_t down_bytes = pager.expert_role_bytes(layer, 2);
@@ -185,7 +203,7 @@ int main(int argc, char ** argv) {
             if (!exact) bad = 1;
 
             const int expert2 = (expert + 1) % NE;
-            const moe_expert_slice * slices2 = pager.slices(layer, expert2);
+            const moe_expert_slice * slices2 = source_pager->slices(layer, expert2);
             const size_t total_bytes2 = pager.expert_role_bytes(layer, 0) + pager.expert_role_bytes(layer, 1) + pager.expert_role_bytes(layer, 2);
             if (total_bytes2 <= total_bytes) {
                 moe_batch_target target2 = {expert2, device, gate_bytes, device + gate_bytes, up_bytes, device + gate_bytes + up_bytes, down_bytes, cache, total_bytes};
@@ -220,7 +238,7 @@ int main(int argc, char ** argv) {
                 moe_batch_target target_pref = {expert_pref, device, gate_bytes, device + gate_bytes, up_bytes, device + gate_bytes + up_bytes, down_bytes, cache, total_bytes};
                 const long pf_hit_before = pager.stats_pf_hit();
                 bool pref_ok = pager.fetch_batch(layer, &target_pref, 1, nullptr);
-                const moe_expert_slice * slices_pref = pager.slices(layer, expert_pref);
+                const moe_expert_slice * slices_pref = source_pager->slices(layer, expert_pref);
                 size_t off_pref = 0;
                 for (int role = 0; role < 3 && pref_ok; ++role) {
                     const size_t bytes = pager.expert_role_bytes(layer, role);
@@ -265,7 +283,7 @@ int main(int argc, char ** argv) {
             if (!pager.fetch_batch(il, targets.data(), count)) { bad = 1; break; }
             bool exact = true;
             for (int e = 0; e < count; ++e) {
-                const moe_expert_slice * slices = pager.slices(il, targets[(size_t) e].expert);
+                const moe_expert_slice * slices = source_pager->slices(il, targets[(size_t) e].expert);
                 size_t offset = 0;
                 for (int role = 0; role < 3; ++role) {
                     std::vector<char> reference(want[role]), actual(want[role]);
