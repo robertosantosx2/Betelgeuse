@@ -17,6 +17,10 @@
 #include <unistd.h>
 #include <cuda_runtime.h>
 #include <cerrno>
+#include <fstream>
+#include <sstream>
+#include <string>
+#include <sys/stat.h>
 
 static const char * MODEL =
     "/mnt/windows/Qwen3.8-Flash-Next-GSQ-RCO-IQ2_XS/IQ2_XS/"
@@ -38,6 +42,111 @@ static bool read_reference(int fd, const moe_expert_slice & slice, void * destin
     return got == bytes;
 }
 
+static bool write_temp_index(const std::string & contents, std::string & path) {
+    char pattern[] = "/tmp/betelgeuse-pack-index-XXXXXX";
+    const int fd = mkstemp(pattern);
+    if (fd < 0) return false;
+    size_t written = 0;
+    while (written < contents.size()) {
+        const ssize_t n = write(fd, contents.data() + written, contents.size() - written);
+        if (n < 0 && errno == EINTR) continue;
+        if (n <= 0) { close(fd); unlink(pattern); return false; }
+        written += (size_t) n;
+    }
+    if (close(fd) != 0) { unlink(pattern); return false; }
+    path = pattern;
+    return true;
+}
+
+static bool verify_pack_index_rejections(moe_pager & pager, const char * experts_bin, const char * index_txt) {
+    std::ifstream input(index_txt);
+    if (!input) return false;
+    std::vector<std::string> lines;
+    std::string line;
+    while (std::getline(input, line)) lines.push_back(line);
+    if (input.bad()) return false;
+
+    std::vector<size_t> data_rows;
+    for (size_t i = 0; i < lines.size(); ++i) {
+        const size_t first = lines[i].find_first_not_of(" \\t\\r");
+        if (first != std::string::npos && lines[i][first] != '#') data_rows.push_back(i);
+    }
+    if (data_rows.size() < 2) return false;
+
+    auto join_lines = [](const std::vector<std::string> & source) {
+        std::string result;
+        for (const auto & item : source) result += item + "\\n";
+        return result;
+    };
+    auto reject_index = [&](const char * label, const std::vector<std::string> & bad_lines) {
+        std::string temporary;
+        if (!write_temp_index(join_lines(bad_lines), temporary)) return false;
+        std::string error;
+        const bool rejected = !pager.use_pack(experts_bin, temporary.c_str(), error) &&
+                              !pager.pack_mode() && pager.pack_fd() < 0;
+        unlink(temporary.c_str());
+        printf("  malformed-index %-18s %s (%s)\\n", label, rejected ? "PASS" : "FAIL", error.c_str());
+        return rejected;
+    };
+
+    bool ok = true;
+    std::vector<std::string> duplicate = lines;
+    duplicate.push_back(lines[data_rows.front()]);
+    ok &= reject_index("duplicate-layer", duplicate);
+
+    std::vector<std::string> missing = lines;
+    missing.erase(missing.begin() + (ptrdiff_t) data_rows.back());
+    ok &= reject_index("missing-layer", missing);
+
+    std::vector<std::string> bad_type = lines;
+    {
+        std::istringstream row(bad_type[data_rows.front()]);
+        int layer, gu, dt;
+        int64_t base, blob;
+        uint64_t go, uo, doff;
+        if (!(row >> layer >> gu >> dt >> base >> blob >> go >> uo >> doff)) return false;
+        std::ostringstream replacement;
+        replacement << layer << " " << (gu + 1) << " " << dt << " " << base << " " << blob
+                    << " " << go << " " << uo << " " << doff;
+        bad_type[data_rows.front()] = replacement.str();
+    }
+    ok &= reject_index("wrong-tensor-type", bad_type);
+
+    std::vector<std::string> bad_range = lines;
+    {
+        std::istringstream row(bad_range[data_rows.front()]);
+        int layer, gu, dt;
+        int64_t base, blob;
+        uint64_t go, uo, doff;
+        if (!(row >> layer >> gu >> dt >> base >> blob >> go >> uo >> doff)) return false;
+        std::ostringstream replacement;
+        replacement << layer << " " << gu << " " << dt << " " << INT64_MAX << " " << blob
+                    << " " << go << " " << uo << " " << doff;
+        bad_range[data_rows.front()] = replacement.str();
+    }
+    ok &= reject_index("out-of-range", bad_range);
+
+    struct stat source_stat;
+    if (stat(experts_bin, &source_stat) != 0 || source_stat.st_size <= 1) return false;
+    std::string pattern = std::string(experts_bin) + ".truncated-XXXXXX";
+    std::vector<char> writable(pattern.begin(), pattern.end());
+    writable.push_back('\\0');
+    const int truncated_fd = mkstemp(writable.data());
+    if (truncated_fd < 0) return false;
+    const bool truncated_created = ftruncate(truncated_fd, source_stat.st_size - 1) == 0;
+    close(truncated_fd);
+    const std::string truncated_path = writable.data();
+    if (!truncated_created) { unlink(truncated_path.c_str()); return false; }
+    std::string error;
+    const bool truncated_rejected = !pager.use_pack(truncated_path.c_str(), index_txt, error) &&
+                                    !pager.pack_mode() && pager.pack_fd() < 0;
+    unlink(truncated_path.c_str());
+    printf("  malformed-pack  truncated-file    %s (%s)\\n",
+           truncated_rejected ? "PASS" : "FAIL", error.c_str());
+    ok &= truncated_rejected;
+    return ok;
+}
+
 int main(int argc, char ** argv) {
     const char * model_path = argc > 1 ? argv[1] : MODEL;
     const int NL = argc > 2 ? atoi(argv[2]) : 48;
@@ -57,6 +166,10 @@ int main(int argc, char ** argv) {
         return 1;
     }
     if (argc == 8) {
+        if (!verify_pack_index_rejections(pager, argv[5], argv[6])) {
+            fprintf(stderr, "FAIL: malformed pack/index rejection regression\\n");
+            return 1;
+        }
         if (!pager.use_pack(argv[5], argv[6], err)) {
             fprintf(stderr, "FAIL: pager.use_pack(%s): %s\n", argv[5], err.c_str());
             return 1;
