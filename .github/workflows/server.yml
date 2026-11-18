@@ -74,7 +74,8 @@ jobs:
             curl \
             wget \
             language-pack-en \
-            libssl-dev
+            libssl-dev \
+            librsvg2-bin
 
       - name: Clone
         id: checkout
@@ -154,6 +155,10 @@ jobs:
 
   windows:
     runs-on: windows-2025
+
+    steps:
+      - name: Install SVG rasterizer
+        run: choco install rsvg-convert --yes --no-progress
 
     cache-mode: write
     permissions:
