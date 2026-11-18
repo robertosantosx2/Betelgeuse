@@ -61,7 +61,7 @@ int main(int argc, char ** argv) {
             fprintf(stderr, "FAIL: pager.use_pack(%s): %s\n", argv[5], err.c_str());
             return 1;
         }
-        if (!reference_pager.init(argv[7], NL, NE, NU, err)) {
+        if (!reference_pager.init(argv[7], NL, NE, NU, err, 2)) {
             fprintf(stderr, "FAIL: reference pager.init(%s): %s\n", argv[7], err.c_str());
             return 1;
         }
