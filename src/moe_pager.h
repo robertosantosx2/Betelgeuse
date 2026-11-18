@@ -170,6 +170,7 @@ private:
     // per-(layer,role) byte length taken from the GGUF index; the pack blob is
     // the same gate|up|down concatenation, so these also size the pack layout
     std::vector<size_t> role_bytes_;
+    std::vector<int> role_types_;             // GGML type for each (layer, role), from GGUF metadata
 
     // single-blob pack mode (see use_pack)
     bool   pack_mode_ = false;
