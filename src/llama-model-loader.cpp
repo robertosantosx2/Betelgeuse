@@ -1158,11 +1158,13 @@ bool llama_model_loader::lazy_read::add(const std::string & name, const ggml_ten
 struct ggml_tensor * llama_model_loader::create_tensor(
         const llama_hparams & hparams, const buft_list_t * buft_list_cpu, const buft_list_t * buft_list_input, const buft_list_t * buft_list_output,
         const buft_list_t * buft_list_layer, const LLM_TN_IMPL & tn, const std::initializer_list<int64_t> & ne, int flags) {
-    // set below, before buft_for_tensor() runs
+    // Set below, before buft_for_tensor() runs. Keep the source-payload
+    // classification independent from lazy-read selection.
     bool is_lazy = false;
+    bool is_external = false;
 
     auto ctx_for_buft = [&](ggml_backend_buffer_type_t buft) -> ggml_context * {
-        const ctx_key key { buft, is_lazy };
+        const ctx_key key { buft, is_lazy, is_external };
 
         auto it = ctx_map.find(key);
         if (it == ctx_map.end()) {
@@ -1381,9 +1383,14 @@ struct ggml_tensor * llama_model_loader::create_tensor(
         return NULL;
     }
 
-    if (flags & TENSOR_READ_LAZY) {
+    // Resolve the source weight for every real tensor, not only lazy tensors:
+    // external payloads must use a dedicated context with a dummy backend buffer.
+    const llama_tensor_weight & weight = require_weight(tn.str().c_str());
+    is_external = weight.external;
+
+    if ((flags & TENSOR_READ_LAZY) && !is_external) {
         // the decision must not depend on the load mode, or the memory-fit pass (no_alloc, no mmap)
-        is_lazy = lazy.add(tn.str(), cur, no_alloc ? nullptr : &require_weight(tn.str().c_str()));
+        is_lazy = lazy.add(tn.str(), cur, no_alloc ? nullptr : &weight);
     }
 
     ggml_tensor t_meta = *cur;
