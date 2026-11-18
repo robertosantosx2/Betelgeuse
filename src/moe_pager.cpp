@@ -18,6 +18,8 @@
 #include <sstream>
 #include <cstdio>
 #include <cstdlib>
+#include <cerrno>
+#include <new>
 #include <cstring>
 #include <limits>
 #include <stdexcept>
@@ -48,7 +50,12 @@ void moe_pager::ensure_dma_events() {
 }
 
 moe_pager::~moe_pager() {
-    if (ring_) { io_uring_queue_exit((struct io_uring *) ring_); ring_ = nullptr; }
+    if (ring_) {
+        struct io_uring * ring = (struct io_uring *) ring_;
+        io_uring_queue_exit(ring);
+        delete ring;
+        ring_ = nullptr;
+    }
     if (stage_) { cudaFreeHost(stage_); stage_ = nullptr; }
     if (cache_) {
         if (cache_registered_) {
@@ -279,10 +286,14 @@ bool moe_pager::init(const char * gguf_path, int n_layer, int n_expert, int n_us
     for (int i = n_staging - 1; i >= (int) demand_stages_; i--) free_stage_.push_back(i);
     for (int i = (int) demand_stages_ - 1; i >= 0; i--) free_demand_.push_back(i);
 
-    ring_ = new io_uring();
-    if (io_uring_queue_init(256, (struct io_uring *) ring_, 0) < 0) {
-        err = "io_uring_queue_init failed"; return false;
+    struct io_uring * ring = new (std::nothrow) io_uring();
+    if (!ring) { err = "io_uring allocation failed"; return false; }
+    if (io_uring_queue_init(256, ring, 0) < 0) {
+        delete ring;
+        err = "io_uring_queue_init failed";
+        return false;
     }
+    ring_ = ring;
     return true;
 }
 
