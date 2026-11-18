@@ -493,7 +493,8 @@ int moe_pager::submit_(int key, bool demand) {
             if (submitted == -EINTR) continue;
             if (submitted <= 0) GGML_ABORT("MoE pager could not submit queued reads: %d", submitted);
             struct io_uring_cqe * cqe = nullptr;
-            const int wait_status = io_uring_wait_cqe((struct io_uring *) ring_, &cqe);
+            int wait_status;
+            do { wait_status = io_uring_wait_cqe((struct io_uring *) ring_, &cqe); } while (wait_status == -EINTR);
             if (wait_status < 0) GGML_ABORT("MoE pager completion wait failed: %d", wait_status);
             if (cqe) {
                 const uint64_t ud = cqe->user_data;
@@ -538,7 +539,9 @@ bool moe_pager::wait_ok_(int r) {
     while (reqs_[r].done < need) {
         had_wait = true;
         struct io_uring_cqe * cqe = nullptr;
-        if (io_uring_wait_cqe((struct io_uring *) ring_, &cqe) < 0) break;
+        const int wait_status = io_uring_wait_cqe((struct io_uring *) ring_, &cqe);
+        if (wait_status == -EINTR) continue;
+        if (wait_status < 0) break;
         const uint64_t ud = cqe->user_data;
         const int res = cqe->res;
         io_uring_cqe_seen((struct io_uring *) ring_, cqe);
