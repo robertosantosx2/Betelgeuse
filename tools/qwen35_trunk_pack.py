@@ -32,12 +32,20 @@ PACK_NAMES = ("experts.bin", "expert-pack.json", "native_experts.txt")
 
 
 def qwen35_layout(model):
+    reader = GGUFReader(model)
+    architecture = reader.fields.get("general.architecture")
+    block_count = reader.fields.get("qwen35moe.block_count")
+    if architecture is None or architecture.contents() != "qwen35moe":
+        raise ValueError("expected a GGUF with general.architecture=qwen35moe")
+    if block_count is None or block_count.contents() != TOTAL_LAYERS:
+        found = None if block_count is None else block_count.contents()
+        raise ValueError(f"Qwen3.5-35B-A3B requires qwen35moe.block_count={TOTAL_LAYERS}; found {found}")
+    names = {tensor.name for tensor in reader.tensors}
     layout, experts, total = moe_pack.expert_layout(model)
     if len(layout) != TOTAL_LAYERS:
         raise ValueError(f"Qwen3.5-35B-A3B requires {TOTAL_LAYERS} expert layers (40 trunk + blk.40 MTP); found {len(layout)}")
     if experts != EXPERTS:
         raise ValueError(f"Qwen3.5-35B-A3B requires {EXPERTS} experts per layer; found {experts}")
-    names = {tensor.name for tensor in GGUFReader(model).tensors}
     for layer in range(TOTAL_LAYERS):
         for role in ("gate", "up", "down"):
             name = f"blk.{layer}.ffn_{role}_exps.weight"
