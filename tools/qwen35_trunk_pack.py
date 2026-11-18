@@ -163,6 +163,24 @@ def verify(model, output, all_experts=False):
     expected_size = (total + 4095) // 4096 * 4096
     if pack.stat().st_size != expected_size:
         raise ValueError("pack byte size does not match Qwen3.5 trunk layout")
+    metadata = json.loads((output / "expert-pack.json").read_text(encoding="utf-8"))
+    expected_metadata = {
+        "format": "native-experts-v3",
+        "model_family": "qwen35moe",
+        "mode": "trunk-only",
+        "layers": TRUNK_LAYERS,
+        "experts_per_layer": experts,
+        "mtp_layer_preserved_in_dense": MTP_LAYER,
+        "bytes": expected_size,
+    }
+    if any(metadata.get(key) != value for key, value in expected_metadata.items()):
+        raise ValueError("expert-pack.json does not describe the Qwen3.5 trunk-only pack")
+    digest = hashlib.sha256()
+    with pack.open("rb") as packed:
+        for chunk in iter(lambda: packed.read(8 * 1024 * 1024), b""):
+            digest.update(chunk)
+    if digest.hexdigest() != metadata.get("sha256"):
+        raise ValueError("experts.bin SHA-256 does not match expert-pack.json")
     actual = [line.split() for line in (output / "native_experts.txt").read_text().splitlines()
               if line.strip() and not line.lstrip().startswith("#")]
     expected = [line.split() for line in moe_pack.index_text(layout).splitlines()[1:]]
@@ -185,6 +203,9 @@ def build(model, output):
     model = model.resolve(strict=True)
     layout, experts, total = qwen35_layout(model)
     output.mkdir(parents=True, exist_ok=True)
+    required_space = model.stat().st_size + 2 * 1024 * 1024
+    if shutil.disk_usage(output).free < required_space:
+        raise OSError(f"not enough free space: need approximately {required_space / 2**30:.2f} GiB for the complete bundle")
     names = (DENSE_NAME,) + PACK_NAMES
     if any(os.path.lexists(output / name) for name in names):
         raise FileExistsError("bundle output already exists; choose an empty directory")
