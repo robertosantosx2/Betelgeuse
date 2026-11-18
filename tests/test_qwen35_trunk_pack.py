@@ -2,6 +2,7 @@ import importlib.util
 from pathlib import Path
 import tempfile
 import unittest
+from unittest import mock
 
 import numpy as np
 
@@ -82,7 +83,7 @@ class TestQwen35TrunkPack(unittest.TestCase):
         # A valid 41-layer source is required; changing the declared architecture
         # depth must not cause a silent 40-layer truncation.
         original = qwen35.qwen35_layout
-        with unittest.mock.patch.object(qwen35.moe_pack, "expert_layout",
+        with mock.patch.object(qwen35.moe_pack, "expert_layout",
                                         side_effect=lambda model: (original(model)[0][:40], 256, 1)):
             with self.assertRaisesRegex(ValueError, "requires 41 expert layers"):
                 qwen35.qwen35_layout(self.model)
