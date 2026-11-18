@@ -1486,7 +1486,7 @@ void llama_model_loader::init_mappings(bool prefetch, llama_mlocks * mlock_mmaps
             llama_mmap::ranges file_no_prefetch = lazy.for_file(idx);
             if (moe_direct_io) {
                 for (const auto & it : weights_map) {
-                    if (it.second.idx == idx && is_moe_expert_tensor(it.first)) {
+                    if (it.second.idx == idx && !it.second.external && is_moe_expert_tensor(it.first)) {
                         file_no_prefetch.emplace_back(it.second.offs, it.second.offs + ggml_nbytes(it.second.tensor));
                     }
                 }
@@ -1506,7 +1506,9 @@ void llama_model_loader::init_mappings(bool prefetch, llama_mlocks * mlock_mmaps
 
     // compute the total size of all tensors for progress reporting
     for (const auto & it : weights_map) {
-        size_data += ggml_nbytes(it.second.tensor);
+        if (!it.second.external) {
+            size_data += ggml_nbytes(it.second.tensor);
+        }
     }
 }
 
@@ -1750,6 +1752,10 @@ bool llama_model_loader::load_all_data(
         const auto * weight = get_weight(ggml_get_name(cur));
         if (weight == nullptr) {
             // this can happen with split experts models
+            continue;
+        }
+        if (weight->external) {
+            // The payload is supplied by the native expert pack, never by the stripped GGUF.
             continue;
         }
 
