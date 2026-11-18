@@ -46,7 +46,7 @@ build-qwen35/bin/test_moe_pager \
   "$ORIGINAL"
 ```
 
-When the pack arguments are supplied, the test first checks rejection of duplicate and missing layer rows, a mismatched tensor type, an out-of-range layer offset and a truncated pack. Each rejection must leave pack mode disabled and must not retain a pack descriptor. It then activates the valid pack and runs the existing byte-exact synchronous, asynchronous and batch pager checks against the original GGUF.
+When the pack arguments are supplied, the test first checks rejection of a missing index, missing pack file, failed pager initialization, duplicate and missing layer rows, a mismatched tensor type, an out-of-range layer offset and a truncated pack. Every rejected pack activation must leave pack mode disabled and must not retain a pack descriptor. It then activates the valid pack and runs the existing byte-exact synchronous, asynchronous and batch pager checks against the original GGUF.
 
 The malformed-index fixtures are created as temporary files. The truncated-pack fixture is a sparse temporary file beside `experts.bin`; the existing bundle files are not modified.
 
