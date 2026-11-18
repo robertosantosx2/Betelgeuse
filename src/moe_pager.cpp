@@ -66,11 +66,12 @@ moe_pager::~moe_pager() {
         }
         cache_ = nullptr;
     }
-        for (int sfd : fds_) {
+    for (int sfd : fds_) {
         if (sfd >= 0) close(sfd);
     }
     fds_.clear();
-    if (fd_ >= 0) { close(fd_); fd_ = -1; }
+    // fd_ is also owned by fds_ (the first shard); do not close it twice.
+    fd_ = -1;
     if (fd_pack_ >= 0) { close(fd_pack_); fd_pack_ = -1; }
     if (fd_pack_buf_ >= 0) { close(fd_pack_buf_); fd_pack_buf_ = -1; }
     if (fd_warm_ >= 0) { close(fd_warm_); fd_warm_ = -1; }
