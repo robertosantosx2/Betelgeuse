@@ -320,8 +320,8 @@ bool moe_pager::use_pack(const char * experts_bin, const char * index_txt, std::
     if (candidate_fd < 0) { err = "open experts.bin O_DIRECT failed"; return false; }
 
     struct stat pack_stat;
-    if (fstat(candidate_fd, &pack_stat) != 0 || pack_stat.st_size < 0) {
-        err = "cannot stat experts.bin";
+    if (fstat(candidate_fd, &pack_stat) != 0 || pack_stat.st_size < 0 || !S_ISREG(pack_stat.st_mode)) {
+        err = "experts.bin must be a regular file with a readable size";
         return false;
     }
     const uint64_t pack_size = (uint64_t) pack_stat.st_size;
@@ -346,11 +346,15 @@ bool moe_pager::use_pack(const char * experts_bin, const char * index_txt, std::
         std::istringstream is(line);
         int il = -1, gu = -1, dt = -1;
         int64_t base_signed = -1, blob_signed = -1;
-        uint64_t gate_source_off = 0, up_source_off = 0, down_source_off = 0;
+        int64_t gate_source_off = -1, up_source_off = -1, down_source_off = -1;
         std::string trailing;
         if (!(is >> il >> gu >> dt >> base_signed >> blob_signed
                  >> gate_source_off >> up_source_off >> down_source_off) || (is >> trailing)) {
             err = "bad native-experts-v3 index line";
+            return false;
+        }
+        if (gate_source_off < 0 || up_source_off < 0 || down_source_off < 0) {
+            err = "negative source tensor offset in pack index";
             return false;
         }
         (void) gate_source_off;
@@ -365,7 +369,8 @@ bool moe_pager::use_pack(const char * experts_bin, const char * index_txt, std::
         const size_t g = role_bytes_[layer_role + 0];
         const size_t u = role_bytes_[layer_role + 1];
         const size_t d = role_bytes_[layer_role + 2];
-        if (g > SIZE_MAX - u || g + u > SIZE_MAX - d || g + u + d != (size_t) blob_signed) {
+        if ((uint64_t) blob_signed > (uint64_t) SIZE_MAX ||
+            g > SIZE_MAX - u || g + u > SIZE_MAX - d || g + u + d != (size_t) blob_signed) {
             err = "pack blob_bytes do not match the GGUF gate|up|down sizes";
             return false;
         }
