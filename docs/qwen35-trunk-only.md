@@ -70,7 +70,7 @@ This initializes the pager against the stripped dense GGUF with 40 trunk layers,
 
 ## Validation status
 
-The regression suite synthesizes a 41-layer / 256-expert GGUF and checks:
+The synthetic regression suite checks:
 
 - the pack contains only layers 0–39;
 - all 10,240 packed trunk experts round-trip byte-for-byte;
@@ -79,4 +79,25 @@ The regression suite synthesizes a 41-layer / 256-expert GGUF and checks:
 - the Qwen3.8 PLE metadata/file is not emitted;
 - invalid layer counts are rejected.
 
-Passing these tests validates the packer format, not end-to-end model inference. The real model dry-run, full pack/verify, CUDA build, runtime startup, and MSI benchmark remain separate validation gates. In particular, do not infer Qwen3.5 inference support solely from the existence of this packer.
+The real Qwen3.5-35B-A3B GGUF has also been processed on the target MSI:
+
+- dry-run, real pack creation and `--verify-all` completed; all 10,240 trunk experts verified;
+- CUDA build of `test_moe_pager` completed for `sm_86`;
+- native pager test against the original GGUF completed with `result: PASS`;
+- synchronous fetch, async prefetch/commit, write-allocate, cache reuse and batch reads were byte-exact in the exercised cases.
+
+The detailed hardware, commands, pack hashes and test output are recorded in [qwen35-msi-validation-2026-11-18.md](qwen35-msi-validation-2026-11-18.md).
+
+These results validate the packer and pager data path on the MSI. They do **not** establish end-to-end model inference, graph scheduling, runtime launch integration, throughput, or context-length capability. Do not infer Qwen3.5 inference support solely from this packer or pager test.
+
+## Next validation gate
+
+Inspect and document the actual runtime launch path and prove that it:
+
+1. recognizes the Qwen3.5 trunk-only metadata;
+2. initializes the pager for exactly 40 trunk layers;
+3. activates pack mode before any read of stripped trunk expert payloads;
+4. leaves MTP/NextN block 40 resident and available to the model loader;
+5. keeps existing non-Qwen3.5 and non-pack paths unchanged.
+
+Only after these conditions are met should a minimal logits-equivalence or one-token integration test be designed.
