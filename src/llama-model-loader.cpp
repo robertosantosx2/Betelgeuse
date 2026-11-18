@@ -738,6 +738,16 @@ llama_model_loader::llama_model_loader(
         llm_kv = LLM_KV(llm_arch_from_string(arch_name));
     }
 
+    // A trunk-only bundle deliberately keeps routed-expert tensor descriptors
+    // while moving their payloads out of the dense GGUF. Detect that state from
+    // the already-validated file bounds so the launch path cannot mistake the
+    // stripped dense file for a complete standalone model.
+    stripped_experts = std::any_of(weights_map.begin(), weights_map.end(),
+        [](const auto & entry) { return entry.second.external; });
+    if (stripped_experts) {
+        LLAMA_LOG_INFO("%s: detected external routed-expert payloads; native MoE pack is required\n", __func__);
+    }
+
     n_kv      = gguf_get_n_kv(metadata);
     n_tensors = weights_map.size();
 
