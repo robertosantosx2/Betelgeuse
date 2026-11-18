@@ -109,20 +109,20 @@ static bool verify_pack_index_rejections(moe_pager & pager, const char * experts
     std::string missing_error;
     const bool missing_index_rejected = !pager.use_pack(experts_bin, missing_index.c_str(), missing_error) &&
                                         !pager.pack_mode() && pager.pack_fd() < 0;
-    printf("  missing-index   %s (%s)\\n", missing_index_rejected ? "PASS" : "FAIL", missing_error.c_str());
+    printf("  missing-index   %s (%s)\n", missing_index_rejected ? "PASS" : "FAIL", missing_error.c_str());
     ok &= missing_index_rejected;
 
     missing_error.clear();
     const bool missing_pack_rejected = !pager.use_pack(missing_pack.c_str(), index_txt, missing_error) &&
                                        !pager.pack_mode() && pager.pack_fd() < 0;
-    printf("  missing-pack    %s (%s)\\n", missing_pack_rejected ? "PASS" : "FAIL", missing_error.c_str());
+    printf("  missing-pack    %s (%s)\n", missing_pack_rejected ? "PASS" : "FAIL", missing_error.c_str());
     ok &= missing_pack_rejected;
 
     moe_pager invalid_pager;
     missing_error.clear();
     const bool pager_init_rejected = !invalid_pager.init(missing_model.c_str(),
         pager.n_layer(), pager.n_expert(), pager.n_used(), missing_error);
-    printf("  pager-init-fail %s (%s)\\n", pager_init_rejected ? "PASS" : "FAIL", missing_error.c_str());
+    printf("  pager-init-fail %s (%s)\n", pager_init_rejected ? "PASS" : "FAIL", missing_error.c_str());
     ok &= pager_init_rejected;
     std::vector<std::string> duplicate = lines;
     duplicate.push_back(lines[data_rows.front()]);
