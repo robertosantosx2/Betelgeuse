@@ -90,9 +90,24 @@ The detailed hardware, commands, pack hashes and test output are recorded in [qw
 
 These results validate the packer and pager data path on the MSI. They do **not** establish end-to-end model inference, graph scheduling, runtime launch integration, throughput, or context-length capability. Do not infer Qwen3.5 inference support solely from this packer or pager test.
 
+## Runtime audit update (2026-11-19)
+
+The runtime path has now been inspected and hardened in the PR branch:
+
+- the loader identifies stripped bundles from explicit GGUF metadata;
+- it verifies all three routed expert tensors in blocks 0-39 have external payloads and all three block-40 MTP expert tensors remain resident;
+- only external trunk expert payloads are skipped during normal tensor loading, so MTP/NextN experts are still loaded from the dense GGUF;
+- stripped bundles are rejected unless direct I/O, the GGUF path, and the pack directory are configured;
+- pager initialization and pack activation are mandatory for stripped bundles; failure aborts startup before the MoE execution pool is allocated;
+- the special behavior is metadata-gated, preserving existing non-stripped loading paths.
+
+Audit details and the pending acceptance checklist are in [qwen35-runtime-audit-2026-11-19.md](qwen35-runtime-audit-2026-11-19.md).
+
 ## Next validation gate
 
-Inspect and document the actual runtime launch path and prove that it:
+The Linux CI build and tests must now prove that the runtime changes compile and pass. After that, verify startup failure for an absent/invalid pack and successful pack activation with the valid bundle. Do not run inference yet.
+
+The runtime launch path must continue to satisfy:
 
 1. recognizes the Qwen3.5 trunk-only metadata;
 2. initializes the pager for exactly 40 trunk layers;
