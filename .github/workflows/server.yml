@@ -74,7 +74,9 @@ jobs:
             curl \
             wget \
             language-pack-en \
-            libssl-dev
+            libssl-dev \
+            librsvg2-bin \
+            imagemagick
 
       - name: Clone
         id: checkout
