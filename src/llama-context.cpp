@@ -8666,8 +8666,8 @@ void llama_context::moe_adapt_run() {
             const int slot = moe.adapt_pend_e[(size_t) il * n_exp + e];
             if (slot < 0) continue;
             moe.adapt_pend_e[(size_t) il * n_exp + e] = -1;
-            const int base  = il * s_pl;                 // adapt_pend_e holds a
-            const int local = slot - base;                // GLOBAL slot index
+            const int base  = moe_get_layer_base_slot(il, moe.n_layer);
+            const int local = slot - base;
             if (local < 0 || local >= s_pl) continue;
             const int layer_slots = moe_get_layer_slots(il, moe.n_layer);
             const size_t slot_count = (size_t) layer_slots + (moe.sentinel_slot ? 1u : 0u);
@@ -8733,7 +8733,8 @@ void llama_context::moe_adapt_run() {
             if (c_score <= v_score) continue;
             // reserve the victim slot until the swap lands: freeing it here would
             // let the demand path reassign it before the commit DMA arrives
-            moe.adapt_pend_e[lb + cand[i].second] = base + victim_slot;   // global
+            moe.adapt_pend_e[lb + cand[i].second] =
+                moe_get_layer_base_slot(il, moe.n_layer) + victim_slot;
             if (pager.prefetch(il, cand[i].second)) moe.adapt_swaps++;
         }
     }
