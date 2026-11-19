@@ -779,7 +779,14 @@ bool moe_pager::prefetch(int il, int e) {
 bool moe_pager::fetch_direct_io(int il, int e, void * dst_gate, size_t gate_bytes,
                                 void * dst_up, size_t up_bytes,
                                 void * dst_down, size_t down_bytes, void * stream, int slot_idx) {
-    if (il < 0 || il >= n_layer_ || e < 0 || e >= n_expert_) return false;
+    if (il < 0 || il >= n_layer_ || e < 0 || e >= n_expert_ ||
+            !dst_gate || !dst_up || !dst_down ||
+            gate_bytes != role_bytes_[(size_t) il * 3 + 0] ||
+            up_bytes != role_bytes_[(size_t) il * 3 + 1] ||
+            down_bytes != role_bytes_[(size_t) il * 3 + 2]) {
+        return false;
+    }
+    (void) stream;
     const moe_expert_slice * s = slices(il, e);
     const int st = (slot_idx >= 0 ? slot_idx : 0) % (demand_stages_ > 0 ? demand_stages_ : 64);
     char * src = stage_ + (size_t) st * stage_bytes_;
@@ -816,8 +823,11 @@ bool moe_pager::fetch_direct_io(int il, int e, void * dst_gate, size_t gate_byte
         const size_t avail = pack_mode_
             ? role_bytes_[(size_t) il * 3 + (size_t) k]
             : ((size_t) s[k].len - skip);
-        cudaMemcpy(dst[k], src + (pack_mode_ ? 0 : off) + skip,
-                   std::min(want[k], avail), cudaMemcpyHostToDevice);
+        if (want[k] > avail || cudaMemcpy(dst[k], src + (pack_mode_ ? 0 : off) + skip,
+                   want[k], cudaMemcpyHostToDevice) != cudaSuccess) {
+            n_io_fail_++;
+            return false;
+        }
         if (!pack_mode_) off += s[k].len;
     }
     return true;
@@ -833,6 +843,13 @@ bool moe_pager::commit(int il, int e, void * dst_gate, size_t gate_bytes,
 bool moe_pager::commit_locked(int il, int e, void * dst_gate, size_t gate_bytes,
                                   void * dst_up,     size_t up_bytes,
                                   void * dst_down,   size_t down_bytes) {
+    if (il < 0 || il >= n_layer_ || e < 0 || e >= n_expert_ ||
+            !dst_gate || !dst_up || !dst_down ||
+            gate_bytes != role_bytes_[(size_t) il * 3 + 0] ||
+            up_bytes != role_bytes_[(size_t) il * 3 + 1] ||
+            down_bytes != role_bytes_[(size_t) il * 3 + 2]) {
+        return false;
+    }
     const int key = il * n_expert_ + e;
     cudaStream_t ws = (cudaStream_t) worker_stream();
     if (!ws) {
@@ -853,8 +870,11 @@ bool moe_pager::commit_locked(int il, int e, void * dst_gate, size_t gate_bytes,
             size_t cwant[3] = { gate_bytes, up_bytes, down_bytes };
             for (int k = 0; k < 3; k++) {
                 const size_t cav = role_bytes_[(size_t) il * 3 + (size_t) k];
-                cudaMemcpy(cdst[k], csrc + coff, std::min(cwant[k], cav), cudaMemcpyHostToDevice);
-                dma_bytes_ += std::min(cwant[k], cav);
+                if (cwant[k] > cav || cudaMemcpy(cdst[k], csrc + coff, cwant[k], cudaMemcpyHostToDevice) != cudaSuccess) {
+                    n_io_fail_++;
+                    return false;
+                }
+                dma_bytes_ += cwant[k];
                 coff += cav;
             }
             cache_stamp_[(size_t) cslot] = ++cache_tick_;
@@ -891,9 +911,12 @@ bool moe_pager::commit_locked(int il, int e, void * dst_gate, size_t gate_bytes,
         const size_t avail = pack_mode_
             ? role_bytes_[(size_t) il * 3 + (size_t) k]
             : ((size_t) s[k].len - skip);
-        cudaMemcpy(dst[k], src + (pack_mode_ ? 0 : off) + skip,
-                   std::min(want[k], avail), cudaMemcpyHostToDevice);
-        dma_bytes_ += std::min(want[k], avail);
+        if (want[k] > avail || cudaMemcpy(dst[k], src + (pack_mode_ ? 0 : off) + skip,
+                   want[k], cudaMemcpyHostToDevice) != cudaSuccess) {
+            n_io_fail_++;
+            return false;
+        }
+        dma_bytes_ += want[k];
         if (!pack_mode_) off += s[k].len;
     }
 
