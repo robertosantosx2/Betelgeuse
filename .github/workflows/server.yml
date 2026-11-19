@@ -75,7 +75,8 @@ jobs:
             wget \
             language-pack-en \
             libssl-dev \
-            librsvg2-bin
+            librsvg2-bin \
+            imagemagick
 
       - name: Clone
         id: checkout
@@ -163,7 +164,7 @@ jobs:
 
     steps:
       - name: Install SVG rasterizer
-        run: choco install rsvg-convert --yes --no-progress
+        run: choco install rsvg-convert imagemagick --yes --no-progress
 
       - name: Clone
         id: checkout
