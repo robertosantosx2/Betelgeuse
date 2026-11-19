@@ -66,7 +66,7 @@ jobs:
         id: build_depends
         run: |
           sudo apt update
-          sudo apt install -y build-essential libssl-dev git-lfs libjpeg-dev librsvg2-bin python3 python3-venv python3-pip
+          sudo apt install -y build-essential libssl-dev git-lfs libjpeg-dev librsvg2-bin imagemagick python3 python3-venv python3-pip
 
       - name: Python Dependencies
         id: python_depends
@@ -122,7 +122,7 @@ jobs:
 
     steps:
       - name: Install SVG rasterizer
-        run: choco install rsvg-convert --yes --no-progress
+        run: choco install rsvg-convert imagemagick --yes --no-progress
 
       - name: Clone
         id: checkout
