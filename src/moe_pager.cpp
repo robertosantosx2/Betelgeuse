@@ -768,6 +768,7 @@ void moe_pager::cache_remove(int il, int expert) {
 }
 
 bool moe_pager::prefetch(int il, int e) {
+    if (il < 0 || il >= n_layer_ || e < 0 || e >= n_expert_) return false;
     std::lock_guard<std::mutex> lock(mtx_);
     const int key = il * n_expert_ + e;
     if (find_(key) >= 0) return true;
@@ -1262,6 +1263,7 @@ bool moe_pager::fetch_batch(int il, const moe_batch_target * targets, int n_targ
     }
     while (io_uring_sq_ready(ring) > 0) {
         const int submitted = io_uring_submit(ring);
+        if (submitted == -EINTR) continue;
         if (submitted <= 0) GGML_ABORT("MoE batch submission failed: %d", submitted);
     }
 
