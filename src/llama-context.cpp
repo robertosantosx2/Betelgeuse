@@ -8076,6 +8076,9 @@ int llama_context::moe_page_pinned(int il, int e, const bool * pinned) {
     }
     if (slot < 0) {
         moe.n_page_fail++;
+        if (model.stripped_experts) {
+            throw std::runtime_error("stripped expert model has no free slot for a routed expert");
+        }
         return -1;
     }
 
@@ -8089,6 +8092,9 @@ int llama_context::moe_page_pinned(int il, int e, const bool * pinned) {
                      (char *) moe.pool_up[il]->data   + (size_t) local * u_slot, u_slot,
                      (char *) moe.pool_down[il]->data + (size_t) local * d_slot, d_slot)) {
         moe.n_page_fail++;
+        if (model.stripped_experts) {
+            throw std::runtime_error("native expert pager read failed for a stripped model");
+        }
         return -1;
     }
     if (moe.count_freq) { moe.slot_freq[(size_t) slot]++; moe.lru.miss((size_t) slot); }
@@ -8276,7 +8282,12 @@ void llama_context::moe_page_batch_sorted(int il, const int32_t * sel, int n) {
         const int32_t e = uniq[k];
         if (moe.slot_of[(size_t) il * n_exp + e] >= 0) continue;
         const size_t v = moe.lru.victim((const char *) pinned.data(), (size_t) base, (size_t) s_pl);
-        if (v == (size_t) -1) continue;
+        if (v == (size_t) -1) {
+            if (model.stripped_experts) {
+                throw std::runtime_error("stripped expert model exhausted its resident expert slots");
+            }
+            continue;
+        }
         int slot = (int) v;
         pinned[(size_t) slot - (size_t) base] = 1;
 
@@ -8303,6 +8314,9 @@ void llama_context::moe_page_batch_sorted(int il, const int32_t * sel, int n) {
                 (char *) moe.pool_down[il]->data + (size_t) slot * d_slot, d_slot,
                 nullptr, slot)) {
                 moe.prefill_miss++;
+                if (model.stripped_experts) {
+                    throw std::runtime_error("native direct-I/O expert read failed during stripped-model prefill");
+                }
                 continue;
             }
             moe.prefill_miss++;
