@@ -1793,6 +1793,17 @@ bool llama_model_loader::load_all_data(
 
         size_t n_size = ggml_nbytes(cur);
 
+        // Paged expert tensors are populated by the native pager after model
+        // construction. Skip their file payload in every load mode; for a
+        // stripped bundle their offsets intentionally lie beyond EOF.
+        const bool is_paged_expert = moe_direct_io && is_moe_expert_tensor(cur->name) &&
+            (!stripped_experts || weight->external);
+        if (is_paged_expert) {
+            GGML_ASSERT(cur->buffer != nullptr || cur->data != nullptr);
+            size_done += n_size;
+            continue;
+        }
+
         const bool from_mapping = use_mmap || lazy.has(cur);
 
         if (from_mapping) {
