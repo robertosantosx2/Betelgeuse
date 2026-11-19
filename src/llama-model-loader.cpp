@@ -10,6 +10,7 @@
 #include <array>
 #include <cinttypes>
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
 #include <filesystem>
 #include <future>
@@ -1462,6 +1463,17 @@ static bool is_moe_expert_tensor(const std::string & name) {
            name.find("_exps")    != std::string::npos;
 }
 
+// Only trunk experts are serviced by the pager. NextN/MTP expert tensors
+// remain ordinary dense-GGUF weights and must be loaded normally.
+static bool is_moe_paged_expert_tensor(const std::string & name, int n_layer) {
+    if (n_layer <= 0 || !is_moe_expert_tensor(name)) {
+        return false;
+    }
+    int layer = -1;
+    return std::sscanf(name.c_str(), "blk.%d.", &layer) == 1 &&
+        layer >= 0 && layer < n_layer;
+}
+
 void llama_model_loader::init_mappings(bool prefetch, llama_mlocks * mlock_mmaps) {
     // note: read_lazy also requires mmap; this condition make sure it's usable even when --load-mode is not set to mmap
     if (use_mmap || lazy.any()) {
@@ -1486,7 +1498,7 @@ void llama_model_loader::init_mappings(bool prefetch, llama_mlocks * mlock_mmaps
             llama_mmap::ranges file_no_prefetch = lazy.for_file(idx);
             if (moe_direct_io) {
                 for (const auto & it : weights_map) {
-                    if (it.second.idx == idx && !it.second.external && is_moe_expert_tensor(it.first)) {
+                    if (it.second.idx == idx && !it.second.external && is_moe_paged_expert_tensor(it.first, moe_n_layer)) {
                         file_no_prefetch.emplace_back(it.second.offs, it.second.offs + ggml_nbytes(it.second.tensor));
                     }
                 }
@@ -1783,7 +1795,7 @@ bool llama_model_loader::load_all_data(
                 }
             }
 
-            const bool is_expert = moe_direct_io && is_moe_expert_tensor(cur->name);
+            const bool is_expert = moe_direct_io && is_moe_paged_expert_tensor(cur->name, moe_n_layer);
 
             if (check_tensors && !is_expert) {
                 validation_result.emplace_back(std::async(std::launch::async, [cur, data, n_size] {
