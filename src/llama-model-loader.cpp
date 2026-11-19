@@ -582,6 +582,34 @@ llama_model_loader::llama_model_loader(
         get_key(llm_kv(LLM_KV_GENERAL_ARCHITECTURE), arch_name, false);
         llm_kv = LLM_KV(llm_arch_from_string(arch_name));
 
+        const int stripped_key = gguf_find_key(metadata, "betelgeuse.stripped_experts");
+        if (stripped_key >= 0) {
+            if (gguf_get_kv_type(metadata, stripped_key) != GGUF_TYPE_BOOL) {
+                throw std::runtime_error("betelgeuse.stripped_experts must be a boolean");
+            }
+            stripped_experts = gguf_get_val_bool(metadata, stripped_key);
+        }
+        const int trunk_only_key = gguf_find_key(metadata, "betelgeuse.qwen35_trunk_only");
+        if (trunk_only_key >= 0 &&
+                (gguf_get_kv_type(metadata, trunk_only_key) != GGUF_TYPE_BOOL ||
+                 !gguf_get_val_bool(metadata, trunk_only_key))) {
+            throw std::runtime_error("betelgeuse.qwen35_trunk_only must be boolean true");
+        }
+        if (stripped_experts) {
+            const int trunk_layers_key = gguf_find_key(metadata, "betelgeuse.trunk_layers");
+            const int mtp_layer_key = gguf_find_key(metadata, "betelgeuse.mtp_layer");
+            if (llm_kv.arch != LLM_ARCH_QWEN35MOE ||
+                    trunk_only_key < 0 ||
+                    trunk_layers_key < 0 ||
+                    mtp_layer_key < 0 ||
+                    gguf_get_kv_type(metadata, trunk_layers_key) != GGUF_TYPE_UINT32 ||
+                    gguf_get_kv_type(metadata, mtp_layer_key) != GGUF_TYPE_UINT32 ||
+                    gguf_get_val_u32(metadata, trunk_layers_key) != 40 ||
+                    gguf_get_val_u32(metadata, mtp_layer_key) != 40) {
+                throw std::runtime_error("invalid Qwen3.5 trunk-only GGUF metadata");
+            }
+        }
+
         files.emplace_back(new llama_file(fname.c_str(), "rb", use_direct_io));
         contexts.emplace_back(ctx);
 
@@ -1469,7 +1497,7 @@ void llama_model_loader::init_mappings(bool prefetch, llama_mlocks * mlock_mmaps
             llama_mmap::ranges file_no_prefetch = lazy.for_file(idx);
             if (moe_direct_io) {
                 for (const auto & it : weights_map) {
-                    if (it.second.idx == idx && is_moe_expert_tensor(it.first)) {
+                    if (it.second.idx == idx && is_moe_expert_tensor(it.first) && (!stripped_experts || it.second.external)) {
                         file_no_prefetch.emplace_back(it.second.offs, it.second.offs + ggml_nbytes(it.second.tensor));
                     }
                 }
@@ -1760,7 +1788,7 @@ bool llama_model_loader::load_all_data(
                 }
             }
 
-            const bool is_expert = moe_direct_io && is_moe_expert_tensor(cur->name);
+            const bool is_expert = moe_direct_io && is_moe_expert_tensor(cur->name) && (!stripped_experts || weight->external);
 
             if (check_tensors && !is_expert) {
                 validation_result.emplace_back(std::async(std::launch::async, [cur, data, n_size] {
@@ -1788,7 +1816,7 @@ bool llama_model_loader::load_all_data(
             const auto & file = files.at(weight->idx);
 
             if (ggml_backend_buffer_is_host(cur->buffer)) {
-                const bool is_expert = moe_direct_io && is_moe_expert_tensor(cur->name);
+                const bool is_expert = moe_direct_io && is_moe_expert_tensor(cur->name) && (!stripped_experts || weight->external);
                 if (!is_expert) {
                     file->seek(weight->offs, SEEK_SET);
                     file->read_raw(cur->data, n_size);
