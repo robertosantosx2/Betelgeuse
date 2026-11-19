@@ -107,6 +107,8 @@ struct llama_model_loader {
     bool use_mmap = false;
     bool use_direct_io = false;
     bool moe_direct_io = false;
+    // Effective trunk layer count; NextN/MTP layers remain dense and are not paged.
+    int moe_n_layer = -1;
     bool check_tensors;
     bool no_alloc;
     bool load_mtp;
