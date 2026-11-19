@@ -29,6 +29,7 @@
 #include <cassert>
 #include <cfloat>
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
 #include <cmath>
 #include <functional>
@@ -1612,6 +1613,7 @@ bool llama_model_base::load_tensors(llama_model_loader & ml) {
 
     this->ml = &ml; // to be used by create_tensor() and load_arch_tensors()
     ml.moe_direct_io = params.moe_direct_io;
+    ml.moe_n_layer = (int) hparams.n_layer();
 
     if (ml.use_mmap && params.load_mode == LLAMA_LOAD_MODE_AUTO) {
         for (const auto & dev : devices) {
@@ -1734,6 +1736,24 @@ bool llama_model_base::load_tensors(llama_model_loader & ml) {
 
         // call the per-model loading function
         load_arch_tensors(ml);
+
+        // The pager owns only effective trunk layers. In hybrid models such as
+        // Qwen3.5, NextN/MTP layers are retained in the dense GGUF and must
+        // never be classified as external pack payloads.
+        if (ml.stripped_experts) {
+            for (const auto & entry : ml.weights_map) {
+                if (!entry.second.external) {
+                    continue;
+                }
+                int layer = -1;
+                if (std::sscanf(entry.first.c_str(), "blk.%d.", &layer) != 1 ||
+                        layer < 0 || layer >= ml.moe_n_layer) {
+                    throw std::runtime_error(format(
+                        "stripped expert payload '%s' is outside the %d-layer trunk; NextN/MTP weights must remain dense",
+                        entry.first.c_str(), ml.moe_n_layer));
+                }
+            }
+        }
 
         // generic pass: load optional per-tensor/per-expert ".scale" tensors (e.g. NVFP4 scale2)
         // this avoids having to add scale loading to every architecture
