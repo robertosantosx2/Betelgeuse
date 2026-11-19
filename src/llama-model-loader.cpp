@@ -1463,8 +1463,8 @@ static bool is_moe_expert_tensor(const std::string & name) {
            name.find("_exps")    != std::string::npos;
 }
 
-// Only trunk experts are serviced by the pager. NextN/MTP expert tensors
-// remain ordinary dense-GGUF weights and must be loaded normally.
+// Only effective trunk experts are serviced by the pager, for mmap and non-mmap
+// load paths alike. NextN/MTP expert tensors remain ordinary dense-GGUF weights.
 static bool is_moe_paged_expert_tensor(const std::string & name, int n_layer) {
     if (n_layer <= 0 || !is_moe_expert_tensor(name)) {
         return false;
