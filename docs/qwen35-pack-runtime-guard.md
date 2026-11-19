@@ -11,6 +11,8 @@ This note documents the runtime-side contract for the Qwen3.5-35B-A3B trunk-only
 
 The dense GGUF retains metadata descriptors for the external trunk expert tensors. The loader marks those weights as external, prevents them from entering lazy-read ranges, and skips their absent payload bytes. A stripped model must activate the native pack; it must never fall back to reading the missing trunk payloads from the dense GGUF.
 
+The runtime also treats the effective trunk layer count (`n_layer_all - n_layer_nextn`) as the pager boundary. Only routed experts below that boundary are skipped during dense-GGUF loading and served by direct I/O. NextN/MTP routed experts at or beyond the boundary remain ordinary dense-GGUF weights and are loaded normally. If a stripped bundle marks any external routed-expert tensor outside the trunk, model loading fails before inference; this prevents an incomplete MTP block from being silently accepted.
+
 ## Native-experts-v3 validation
 
 Before enabling pack mode, `moe_pager::use_pack()` validates:
