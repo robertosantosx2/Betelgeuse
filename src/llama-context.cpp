@@ -3563,6 +3563,17 @@ llama_context::llama_context(
             }
         }
 
+        // A stripped model is valid only when the native pack is active and
+        // the runtime has built its complete expert staging pool. Never let a
+        // partial initialization fall through to the zero sentinel or dense
+        // GGUF expert tensors.
+        if (model.stripped_experts && !pager.pack_mode()) {
+            throw std::runtime_error("stripped expert model has no active native expert pack");
+        }
+        if (model.stripped_experts && !moe_ready) {
+            throw std::runtime_error("stripped expert model MoE pool initialization failed");
+        }
+
         if (cparams.moe_cache_size > 0) {
             moe_cache = std::make_unique<llama_moe_cache>(model, model.no_alloc(), backend_ptrs, backend_buft, cparams.moe_cache_size);
         }
