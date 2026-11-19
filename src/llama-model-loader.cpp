@@ -1199,9 +1199,10 @@ struct ggml_tensor * llama_model_loader::create_tensor(
         const buft_list_t * buft_list_layer, const LLM_TN_IMPL & tn, const std::initializer_list<int64_t> & ne, int flags) {
     // set below, before buft_for_tensor() runs
     bool is_lazy = false;
+    bool is_external = false;
 
     auto ctx_for_buft = [&](ggml_backend_buffer_type_t buft) -> ggml_context * {
-        const ctx_key key { buft, is_lazy };
+        const ctx_key key { buft, is_lazy, is_external };
 
         auto it = ctx_map.find(key);
         if (it == ctx_map.end()) {
@@ -1420,9 +1421,15 @@ struct ggml_tensor * llama_model_loader::create_tensor(
         return NULL;
     }
 
+    if (stripped_experts) {
+        // External trunk tensors use a zero-sized placeholder buffer; the native
+        // pager supplies their expert payloads after model construction. This
+        // classification must be identical in the memory-fit and real load pass.
+        is_external = require_weight(tn.str().c_str()).external;
+    }
     if (flags & TENSOR_READ_LAZY) {
-        // the decision must not depend on the load mode, or the memory-fit pass (no_alloc, no mmap)
-        is_lazy = lazy.add(tn.str(), cur, no_alloc ? nullptr : &require_weight(tn.str().c_str()));
+        // The decision must not depend on the load mode or memory-fit pass.
+        is_lazy = !is_external && lazy.add(tn.str(), cur, no_alloc ? nullptr : &require_weight(tn.str().c_str()));
     }
 
     ggml_tensor t_meta = *cur;
