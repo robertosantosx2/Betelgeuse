@@ -9,8 +9,21 @@ permissions:
 
 jobs:
   linux:
-    runs-on: [self-hosted, Linux, fast]
+    runs-on: ubuntu-24.04
     steps:
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential cmake git
+
+      - name: Install CUDA Toolkit
+        uses: Jimver/cuda-toolkit@v0.2.35
+        with:
+          cuda: '13.2.0'
+          method: 'network'
+          sub-packages: '["nvcc", "cudart-dev"]'
+          non-cuda-sub-packages: '["libcublas-dev"]'
+
       - uses: actions/checkout@v6
         with:
           fetch-depth: 0
@@ -26,7 +39,9 @@ jobs:
                 -DLLAMA_BUILD_EXAMPLES=OFF \
                 -DLLAMA_BUILD_APP=OFF \
                 -DLLAMA_BUILD_IS_DEV=OFF \
-                -DCMAKE_BUILD_TYPE=Release
+                -DCMAKE_BUILD_TYPE=Release \
+                -DGGML_CUDA=ON \
+                -DCMAKE_CUDA_ARCHITECTURES=86
           cmake --build build --config Release -j $(nproc)
           cmake --install build --prefix "$PREFIX" --config Release
 
