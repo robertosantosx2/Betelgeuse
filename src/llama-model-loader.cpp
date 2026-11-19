@@ -626,6 +626,24 @@ llama_model_loader::llama_model_loader(
             n_bytes    += ggml_nbytes(cur);
             weights_map.emplace(tensor_name, llama_tensor_weight(files.back().get(), 0, metadata, cur));
         }
+        if (stripped_experts) {
+            const char * roles[] = {"gate", "up", "down"};
+            for (int il = 0; il <= 40; ++il) {
+                for (const char * role : roles) {
+                    const std::string tensor_name = format("blk.%d.ffn_%s_exps.weight", il, role);
+                    const auto it = weights_map.find(tensor_name);
+                    if (it == weights_map.end()) {
+                        throw std::runtime_error(format("stripped Qwen3.5 bundle is missing tensor '%s'", tensor_name.c_str()));
+                    }
+                    const bool should_be_external = il < 40;
+                    if (it->second.external != should_be_external) {
+                        throw std::runtime_error(format(
+                            "stripped Qwen3.5 bundle has invalid payload placement for '%s' (expected %s)",
+                            tensor_name.c_str(), should_be_external ? "external trunk payload" : "resident MTP payload"));
+                    }
+                }
+            }
+        }
         uint16_t n_split = 0;
         get_key(llm_kv(LLM_KV_SPLIT_COUNT), n_split, false);
 
