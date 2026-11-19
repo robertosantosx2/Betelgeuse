@@ -7,8 +7,8 @@
 // serves every model by regenerating the profile per workload.
 //
 // Usage:
-//   llama-moe-profile --trace traces/qwen38/q38.ids.u8 --layers 48 \
-//       --experts 512 --used 10 --top 72 -o data/profile-qwen4exp.bin
+//   llama-moe-profile --trace IDS --layers 48 --experts 512 --used 10 --top 72
+//       -o data/profile-qwen4exp.bin
 //   llama-moe-profile --check data/profile-qwen4exp.bin   (validate + print)
 #include <cstdint>
 #include <cstdio>
