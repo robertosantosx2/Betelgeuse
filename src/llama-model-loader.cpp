@@ -1796,8 +1796,11 @@ bool llama_model_loader::load_all_data(
         // Paged expert tensors are populated by the native pager after model
         // construction. Skip their file payload in every load mode; for a
         // stripped bundle their offsets intentionally lie beyond EOF.
+        const bool skip_expert_payload = stripped_experts
+            ? weight->external
+            : (use_mmap || (cur->buffer && ggml_backend_buffer_is_host(cur->buffer)));
         const bool is_paged_expert = moe_direct_io && is_moe_expert_tensor(cur->name) &&
-            (!stripped_experts || weight->external);
+            skip_expert_payload;
         if (is_paged_expert) {
             GGML_ASSERT(cur->buffer != nullptr || cur->data != nullptr);
             size_done += n_size;
