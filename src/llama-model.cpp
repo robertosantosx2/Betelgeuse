@@ -1621,7 +1621,6 @@ bool llama_model_base::load_tensors(llama_model_loader & ml) {
                 throw std::runtime_error(format("stripped Qwen3.5 bundle has invalid or missing metadata '%s'", key));
             }
         };
-        require_metadata("betelgeuse.qwen35_trunk_only", "true");
         require_metadata("betelgeuse.trunk_layers", "40");
         require_metadata("betelgeuse.mtp_layer", "40");
         if (arch != LLM_ARCH_QWEN35MOE || hparams.n_layer() != 40 ||
