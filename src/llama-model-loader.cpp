@@ -595,6 +595,9 @@ llama_model_loader::llama_model_loader(
                  !gguf_get_val_bool(metadata, trunk_only_key))) {
             throw std::runtime_error("betelgeuse.qwen35_trunk_only must be boolean true");
         }
+        if (trunk_only_key >= 0 && !stripped_experts) {
+            throw std::runtime_error("Qwen3.5 trunk-only metadata requires betelgeuse.stripped_experts=true");
+        }
         if (stripped_experts) {
             const int trunk_layers_key = gguf_find_key(metadata, "betelgeuse.trunk_layers");
             const int mtp_layer_key = gguf_find_key(metadata, "betelgeuse.mtp_layer");
