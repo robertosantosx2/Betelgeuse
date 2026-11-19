@@ -20,13 +20,16 @@ Before enabling pack mode, `moe_pager::use_pack()` validates:
 1. Every non-comment row has exactly the eight v3 fields.
 2. Every trunk layer occurs exactly once; duplicates and missing layers are rejected.
 3. Gate and up types match the GGUF gate/up tensors, and down type matches the GGUF down tensor.
-4. `blob_bytes` equals the sum of the GGUF gate, up and down expert byte sizes.
-5. Layer and expert offsets are checked without overflowing; every aligned direct-I/O read fits inside a regular `experts.bin` file and the pager's 32-bit slice limits.
-6. The index is built in temporary vectors. The GGUF index remains active and a newly opened pack descriptor is closed if any validation fails.
+4. The gate/up/down source tensor offsets match the corresponding expert tensors in the original GGUF; a stale or cross-model index is rejected.
+5. `blob_bytes` equals the sum of the GGUF gate, up and down expert byte sizes.
+6. Layer and expert offsets are checked without overflowing; every aligned direct-I/O read fits inside a regular `experts.bin` file and the pager's 32-bit slice limits.
+7. The index is built in temporary vectors. The GGUF index remains active and a newly opened pack descriptor is closed if any validation fails.
 
 Only after every row passes are the index vectors, staging size and pack descriptor committed to the pager.
 
-The asynchronous submit path drains all queued SQEs and treats hard submission/completion errors as fatal rather than returning a request that could wait indefinitely. Interrupted completion waits are retried. The pager owns and releases the allocated `io_uring` object as well as its queue.
+The asynchronous submit path drains all queued SQEs, retries interrupted submissions and completion waits, and treats hard submission/completion errors as fatal rather than returning a request that could wait indefinitely. The pager owns and releases the allocated `io_uring` object as well as its queue.
+
+For stripped models, context construction also fails if the native pack is not active, if the full expert staging pool cannot be created, if a routed expert has no resident slot, or if a demand read/DMA fails. The zero sentinel is never accepted as a substitute for a missing expert. Direct prefill DMA uses layer-local slot offsets and rejects partial-size copies or CUDA copy failures.
 
 ## MSI regression command
 
@@ -48,7 +51,7 @@ build-qwen35/bin/test_moe_pager \
   "$ORIGINAL"
 ```
 
-When the pack arguments are supplied, the test first checks rejection of a missing index, missing pack file, failed pager initialization, duplicate and missing layer rows, a mismatched tensor type, an out-of-range layer offset and a truncated pack. Every rejected pack activation must leave pack mode disabled and must not retain a pack descriptor. It then activates the valid pack and runs the existing byte-exact synchronous, asynchronous and batch pager checks against the original GGUF.
+When the pack arguments are supplied, the test first checks rejection of a missing index, missing pack file, failed pager initialization, duplicate and missing layer rows, a mismatched tensor type, a mismatched source tensor offset, an out-of-range layer offset and a truncated pack. Every rejected pack activation must leave pack mode disabled and must not retain a pack descriptor. It then activates the valid pack and runs the existing byte-exact synchronous, asynchronous and batch pager checks against the original GGUF.
 
 The malformed-index fixtures are created as temporary files. The truncated-pack fixture is a sparse temporary file beside `experts.bin`; the existing bundle files are not modified.
 
