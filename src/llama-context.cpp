@@ -8669,9 +8669,11 @@ void llama_context::moe_adapt_run() {
             const int base  = il * s_pl;                 // adapt_pend_e holds a
             const int local = slot - base;                // GLOBAL slot index
             if (local < 0 || local >= s_pl) continue;
-            const size_t g_slot = ggml_nbytes(moe.pool_gate[il]) / (size_t) std::max(1, moe.n_slots);
-            const size_t u_slot = ggml_nbytes(moe.pool_up[il])   / (size_t) std::max(1, moe.n_slots);
-            const size_t d_slot = ggml_nbytes(moe.pool_down[il]) / (size_t) std::max(1, moe.n_slots);
+            const int layer_slots = moe_get_layer_slots(il, moe.n_layer);
+            const size_t slot_count = (size_t) layer_slots + (moe.sentinel_slot ? 1u : 0u);
+            const size_t g_slot = ggml_nbytes(moe.pool_gate[il]) / slot_count;
+            const size_t u_slot = ggml_nbytes(moe.pool_up[il])   / slot_count;
+            const size_t d_slot = ggml_nbytes(moe.pool_down[il]) / slot_count;
             if (!pager.commit(il, e,
                     (char *) moe.pool_gate[il]->data + (size_t) local * g_slot, g_slot,
                     (char *) moe.pool_up[il]->data   + (size_t) local * u_slot, u_slot,
