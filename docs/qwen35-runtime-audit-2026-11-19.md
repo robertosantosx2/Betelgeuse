@@ -27,7 +27,7 @@ The bundle contains 40 paged decoder-trunk layers (blocks 0-39), 256 experts per
 
 The loader previously treated every tensor matching `_exps` as externally paged when `moe_direct_io` was enabled. That included block 40, even though its payload is present in the dense GGUF and is not in the 40-layer pack.
 
-The loader now uses the GGUF tensor's `external` classification for stripped bundles. Only external trunk expert payloads are skipped during mmap prefetch and tensor loading. The payload skip happens before any mapped pointer is derived and applies to every load mode, including non-mmap/direct reads, so an out-of-file trunk offset is never dereferenced. Resident block-40 MTP experts continue through the normal loading path. The constructor also verifies the expected payload placement for all three expert roles in blocks 0-40.
+The loader now uses the GGUF tensor's `external` classification for stripped bundles. Only external trunk expert payloads are skipped during mmap prefetch and tensor loading. The payload skip happens before any mapped pointer is derived and applies to every load mode, including non-mmap/direct reads, so an out-of-file trunk offset is never dereferenced. External trunk tensors are placed in zero-sized placeholder contexts rather than allocating their absent payloads; the same classification is used in the memory-fit and real-load passes. Resident block-40 MTP experts continue through the normal loading path. The constructor also verifies the expected payload placement for all three expert roles in blocks 0-40.
 
 ### 2. Stripped bundles could proceed without a usable pack
 
