@@ -79,6 +79,14 @@ jobs:
             imagemagick \
             liburing-dev
 
+      - name: Install CUDA Toolkit
+        uses: Jimver/cuda-toolkit@v0.2.35
+        with:
+          cuda: '13.2.0'
+          method: 'network'
+          sub-packages: '["nvcc", "cudart-dev"]'
+          non-cuda-sub-packages: '["libcublas-dev"]'
+
       - name: Clone
         id: checkout
         uses: actions/checkout@v6
@@ -107,7 +115,9 @@ jobs:
           cmake -B build \
             -DLLAMA_BUILD_UI=OFF \
             -DLLAMA_USE_PREBUILT_UI=OFF \
-            -DGGML_SCHED_NO_REALLOC=ON
+            -DGGML_SCHED_NO_REALLOC=ON \
+            -DGGML_CUDA=ON \
+            -DCMAKE_CUDA_ARCHITECTURES=86
           cmake --build build --config Release -j $(nproc) --target llama-server
 
       - name: ccache-buckets-save
