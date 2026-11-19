@@ -5,12 +5,12 @@ import unittest
 from unittest import mock
 
 import numpy as np
+from gguf import GGUFReader, GGUFWriter
 
 ROOT = Path(__file__).resolve().parents[1]
 spec = importlib.util.spec_from_file_location("qwen35_trunk_pack", ROOT / "tools/qwen35_trunk_pack.py")
 qwen35 = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(qwen35)
-from gguf import GGUFReader, GGUFWriter
 
 
 class HeaderOnlyReader(GGUFReader):
