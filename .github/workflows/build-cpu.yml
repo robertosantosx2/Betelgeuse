@@ -62,9 +62,6 @@ jobs:
     runs-on: ${{ matrix.os }}
 
     steps:
-      - name: Install image tools
-        run: choco install rsvg-convert imagemagick --yes --no-progress
-
       - name: Clone
         id: checkout
         uses: actions/checkout@v6
@@ -174,6 +171,9 @@ jobs:
             defines: '-G "Ninja Multi-Config" -D CMAKE_TOOLCHAIN_FILE=cmake/arm64-windows-llvm.cmake -DGGML_NATIVE=OFF -DGGML_OPENMP_FETCH=ON -DLLAMA_BUILD_SERVER=ON'
 
     steps:
+      - name: Install image tools
+        run: choco install rsvg-convert imagemagick --yes --no-progress
+
       - name: Clone
         id: checkout
         uses: actions/checkout@v6
