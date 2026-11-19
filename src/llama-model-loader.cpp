@@ -1823,7 +1823,7 @@ bool llama_model_loader::load_all_data(
             const auto & file = files.at(weight->idx);
 
             if (ggml_backend_buffer_is_host(cur->buffer)) {
-                const bool is_expert = moe_direct_io && is_moe_expert_tensor(cur->name);
+                const bool is_expert = moe_direct_io && is_moe_paged_expert_tensor(cur->name, moe_n_layer);
                 if (!is_expert) {
                     file->seek(weight->offs, SEEK_SET);
                     file->read_raw(cur->data, n_size);
