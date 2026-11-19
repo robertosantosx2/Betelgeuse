@@ -3382,8 +3382,17 @@ llama_context::llama_context(
             const int n_exp   = (int) model.hparams.n_expert;
             const int n_used  = (int) model.hparams.n_expert_used();
 
+            const bool qwen35_trunk_only = model.stripped_experts;
+            if (qwen35_trunk_only &&
+                    (model.arch != LLM_ARCH_QWEN35MOE || n_layer != 40 || n_exp != 256 || n_used != 8)) {
+                throw std::runtime_error("Qwen3.5 trunk-only runtime geometry mismatch");
+            }
+
             std::string perr;
             if (!pager.init(cparams.moe_gguf_path, n_layer, n_exp, n_used, perr)) {
+                if (qwen35_trunk_only) {
+                    throw std::runtime_error("Qwen3.5 trunk-only pager initialization failed: " + perr);
+                }
                 LLAMA_LOG_WARN("%s: moe_direct_io OFF: %s\n", __func__, perr.c_str());
             } else {
                 if (cparams.moe_pack_dir) {
@@ -3392,11 +3401,19 @@ llama_context::llama_context(
                     std::string idx = dir + "/native_experts.txt";
                     std::string e2;
                     if (!pager.use_pack(bin.c_str(), idx.c_str(), e2)) {
+                        if (qwen35_trunk_only) {
+                            throw std::runtime_error("Qwen3.5 trunk-only expert pack activation failed: " + e2);
+                        }
                         LLAMA_LOG_WARN("%s: moe pack OFF: %s\n", __func__, e2.c_str());
                     } else {
                         LLAMA_LOG_INFO("%s: moe pack ON: one blob read per expert (%d layers x %d experts)\n",
                                        __func__, n_layer, n_exp);
                     }
+                } else if (qwen35_trunk_only) {
+                    throw std::runtime_error("Qwen3.5 trunk-only GGUF requires an expert pack directory");
+                }
+                if (qwen35_trunk_only && !pager.pack_mode()) {
+                    throw std::runtime_error("Qwen3.5 trunk-only runtime refused: pager pack mode is not active");
                 }
 
                 // Guardrail 1: Dynamic cudaMemGetInfo VRAM Slot Sizing
