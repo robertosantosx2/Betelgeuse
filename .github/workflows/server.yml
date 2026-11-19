@@ -104,7 +104,9 @@ jobs:
         id: cmake_build
         run: |
           cmake -B build \
-            -DGGML_SCHED_NO_REALLOC=ON
+            -DGGML_SCHED_NO_REALLOC=ON \
+            -DLLAMA_BUILD_UI=OFF \
+            -DLLAMA_USE_PREBUILT_UI=OFF
           cmake --build build --config Release -j $(nproc) --target llama-server
 
       - name: ccache-buckets-save
