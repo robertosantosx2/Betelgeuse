@@ -68,6 +68,14 @@ jobs:
           sudo apt update
           sudo apt install -y build-essential libssl-dev git-lfs libjpeg-dev librsvg2-bin imagemagick python3 python3-venv python3-pip liburing-dev
 
+      - name: Install CUDA Toolkit
+        uses: Jimver/cuda-toolkit@v0.2.35
+        with:
+          cuda: '13.2.0'
+          method: 'network'
+          sub-packages: '["nvcc", "cudart-dev"]'
+          non-cuda-sub-packages: '["libcublas-dev"]'
+
       - name: Python Dependencies
         id: python_depends
         run: |
@@ -92,7 +100,9 @@ jobs:
             -DLLAMA_USE_PREBUILT_UI=OFF \
             -DGGML_NATIVE=OFF \
             -DGGML_BACKEND_DL=OFF \
-            -DLLAMA_FATAL_WARNINGS=ON
+            -DLLAMA_FATAL_WARNINGS=ON \
+            -DGGML_CUDA=ON \
+            -DCMAKE_CUDA_ARCHITECTURES=86
           time cmake --build build --config Release -j $(nproc)
 
       - name: ccache-buckets-save
