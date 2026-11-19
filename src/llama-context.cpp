@@ -3571,6 +3571,17 @@ llama_context::llama_context(
             throw std::runtime_error("stripped expert model has no active native expert pack");
         }
         if (model.stripped_experts && !moe_ready) {
+            // Construction is about to throw, so llama_context's destructor
+            // will not run. Release any partially created pool resources here.
+            if (moe.buf) {
+                ggml_backend_buffer_free(moe.buf);
+                moe.buf = nullptr;
+            }
+            if (moe.ctx) {
+                ggml_free(moe.ctx);
+                moe.ctx = nullptr;
+            }
+            moe.buf_bytes = 0;
             throw std::runtime_error("stripped expert model MoE pool initialization failed");
         }
 
