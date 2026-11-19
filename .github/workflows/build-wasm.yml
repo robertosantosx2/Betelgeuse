@@ -53,6 +53,11 @@ jobs:
     runs-on: ubuntu-24.04-arm
 
     steps:
+      - name: Build Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y librsvg2-bin imagemagick
+
       - name: Clone
         id: checkout
         uses: actions/checkout@v6
