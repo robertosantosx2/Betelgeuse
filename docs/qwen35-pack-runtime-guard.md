@@ -38,14 +38,15 @@ After building the CUDA test target, run the pack-mode test with the stripped de
 ```bash
 cd "$HOME/betelgeuse-qwen35-validation"
 
-DENSE="$HOME/benchmarks/qwen3.5-35b-a3b-betelgeuse/Qwen3.5-35B-A3B-Dense.gguf"
 PACK="$HOME/benchmarks/qwen3.5-35b-a3b-betelgeuse"
 ORIGINAL="$HOME/models/tandem-qwen35/Qwen_Qwen3.5-35B-A3B-IQ2_XXS.gguf"
 
 cmake --build build-qwen35 --target test_moe_pager -j2
 
+# The pager must index the original, full GGUF: the pack index records
+# source tensor offsets from that file, not the rewritten dense GGUF offsets.
 build-qwen35/bin/test_moe_pager \
-  "$DENSE" 40 256 8 \
+  "$ORIGINAL" 40 256 8 \
   "$PACK/experts.bin" \
   "$PACK/native_experts.txt" \
   "$ORIGINAL"
