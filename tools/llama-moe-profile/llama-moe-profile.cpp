@@ -42,7 +42,11 @@ bool parse(int argc, char ** argv, opts & o) {
         };
         std::string s;
         auto needi = [&](int & dst) {
-            if (!need(s)) return false; dst = atoi(s.c_str()); return true;
+            if (!need(s)) {
+                return false;
+            }
+            dst = atoi(s.c_str());
+            return true;
         };
         if (a == "--trace") { if (!need(o.trace)) return false; }
         else if (a == "-o") { if (!need(o.out)) return false; }
