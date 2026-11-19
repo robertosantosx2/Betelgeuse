@@ -76,7 +76,8 @@ jobs:
             language-pack-en \
             libssl-dev \
             librsvg2-bin \
-            imagemagick
+            imagemagick \
+            liburing-dev
 
       - name: Clone
         id: checkout
