@@ -15,6 +15,11 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Install Linux build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y liburing-dev librsvg2-bin imagemagick
+
       - name: Build
         run: |
           PREFIX="$(pwd)"/inst
