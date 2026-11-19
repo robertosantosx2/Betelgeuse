@@ -1388,6 +1388,7 @@ void llama_model_base::load_hparams(llama_model_loader & ml) {
         const std::string value = gguf_kv_to_str(ctx, i);
         gguf_kv.emplace(name, value);
     }
+    stripped_experts = ml.stripped_experts;
 
     load_hparams_hadamard(ml);
 
@@ -1612,6 +1613,25 @@ bool llama_model_base::load_tensors(llama_model_loader & ml) {
 
     this->ml = &ml; // to be used by create_tensor() and load_arch_tensors()
     ml.moe_direct_io = params.moe_direct_io;
+
+    if (stripped_experts) {
+        const auto require_metadata = [&](const char * key, const char * expected) {
+            const auto it = gguf_kv.find(key);
+            if (it == gguf_kv.end() || it->second != expected) {
+                throw std::runtime_error(format("stripped Qwen3.5 bundle has invalid or missing metadata '%s'", key));
+            }
+        };
+        require_metadata("betelgeuse.trunk_layers", "40");
+        require_metadata("betelgeuse.mtp_layer", "40");
+        if (arch != LLM_ARCH_QWEN35MOE || hparams.n_layer() != 40 ||
+                hparams.n_layer_all != 41 || hparams.n_expert != 256 ||
+                hparams.n_expert_used_max() != 8) {
+            throw std::runtime_error("stripped Qwen3.5 bundle geometry mismatch (expected 40 trunk + MTP block 40, 256 experts, top-8)");
+        }
+        if (!params.moe_direct_io || !params.moe_gguf_path || !params.moe_pack_dir) {
+            throw std::runtime_error("stripped Qwen3.5 GGUF requires --moe-direct-io, --moe-gguf and --moe-pack-dir; refusing to load without its expert pack");
+        }
+    }
 
     if (ml.use_mmap && params.load_mode == LLAMA_LOAD_MODE_AUTO) {
         for (const auto & dev : devices) {

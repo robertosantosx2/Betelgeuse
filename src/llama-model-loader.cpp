@@ -582,6 +582,37 @@ llama_model_loader::llama_model_loader(
         get_key(llm_kv(LLM_KV_GENERAL_ARCHITECTURE), arch_name, false);
         llm_kv = LLM_KV(llm_arch_from_string(arch_name));
 
+        const int stripped_key = gguf_find_key(metadata, "betelgeuse.stripped_experts");
+        if (stripped_key >= 0) {
+            if (gguf_get_kv_type(metadata, stripped_key) != GGUF_TYPE_BOOL) {
+                throw std::runtime_error("betelgeuse.stripped_experts must be a boolean");
+            }
+            stripped_experts = gguf_get_val_bool(metadata, stripped_key);
+        }
+        const int trunk_only_key = gguf_find_key(metadata, "betelgeuse.qwen35_trunk_only");
+        if (trunk_only_key >= 0 &&
+                (gguf_get_kv_type(metadata, trunk_only_key) != GGUF_TYPE_BOOL ||
+                 !gguf_get_val_bool(metadata, trunk_only_key))) {
+            throw std::runtime_error("betelgeuse.qwen35_trunk_only must be boolean true");
+        }
+        if (trunk_only_key >= 0 && !stripped_experts) {
+            throw std::runtime_error("Qwen3.5 trunk-only metadata requires betelgeuse.stripped_experts=true");
+        }
+        if (stripped_experts) {
+            const int trunk_layers_key = gguf_find_key(metadata, "betelgeuse.trunk_layers");
+            const int mtp_layer_key = gguf_find_key(metadata, "betelgeuse.mtp_layer");
+            if (llm_kv.arch != LLM_ARCH_QWEN35MOE ||
+                    trunk_only_key < 0 ||
+                    trunk_layers_key < 0 ||
+                    mtp_layer_key < 0 ||
+                    gguf_get_kv_type(metadata, trunk_layers_key) != GGUF_TYPE_UINT32 ||
+                    gguf_get_kv_type(metadata, mtp_layer_key) != GGUF_TYPE_UINT32 ||
+                    gguf_get_val_u32(metadata, trunk_layers_key) != 40 ||
+                    gguf_get_val_u32(metadata, mtp_layer_key) != 40) {
+                throw std::runtime_error("invalid Qwen3.5 trunk-only GGUF metadata");
+            }
+        }
+
         files.emplace_back(new llama_file(fname.c_str(), "rb", use_direct_io));
         contexts.emplace_back(ctx);
 
@@ -597,6 +628,24 @@ llama_model_loader::llama_model_loader(
             n_elements += ggml_nelements(cur);
             n_bytes    += ggml_nbytes(cur);
             weights_map.emplace(tensor_name, llama_tensor_weight(files.back().get(), 0, metadata, cur));
+        }
+        if (stripped_experts) {
+            const char * roles[] = {"gate", "up", "down"};
+            for (int il = 0; il <= 40; ++il) {
+                for (const char * role : roles) {
+                    const std::string tensor_name = format("blk.%d.ffn_%s_exps.weight", il, role);
+                    const auto it = weights_map.find(tensor_name);
+                    if (it == weights_map.end()) {
+                        throw std::runtime_error(format("stripped Qwen3.5 bundle is missing tensor '%s'", tensor_name.c_str()));
+                    }
+                    const bool should_be_external = il < 40;
+                    if (it->second.external != should_be_external) {
+                        throw std::runtime_error(format(
+                            "stripped Qwen3.5 bundle has invalid payload placement for '%s' (expected %s)",
+                            tensor_name.c_str(), should_be_external ? "external trunk payload" : "resident MTP payload"));
+                    }
+                }
+            }
         }
         uint16_t n_split = 0;
         get_key(llm_kv(LLM_KV_SPLIT_COUNT), n_split, false);
@@ -1150,9 +1199,10 @@ struct ggml_tensor * llama_model_loader::create_tensor(
         const buft_list_t * buft_list_layer, const LLM_TN_IMPL & tn, const std::initializer_list<int64_t> & ne, int flags) {
     // set below, before buft_for_tensor() runs
     bool is_lazy = false;
+    bool is_external = false;
 
     auto ctx_for_buft = [&](ggml_backend_buffer_type_t buft) -> ggml_context * {
-        const ctx_key key { buft, is_lazy };
+        const ctx_key key { buft, is_lazy, is_external };
 
         auto it = ctx_map.find(key);
         if (it == ctx_map.end()) {
@@ -1371,9 +1421,15 @@ struct ggml_tensor * llama_model_loader::create_tensor(
         return NULL;
     }
 
+    if (stripped_experts) {
+        // External trunk tensors use a zero-sized placeholder buffer; the native
+        // pager supplies their expert payloads after model construction. This
+        // classification must be identical in the memory-fit and real load pass.
+        is_external = require_weight(tn.str().c_str()).external;
+    }
     if (flags & TENSOR_READ_LAZY) {
-        // the decision must not depend on the load mode, or the memory-fit pass (no_alloc, no mmap)
-        is_lazy = lazy.add(tn.str(), cur, no_alloc ? nullptr : &require_weight(tn.str().c_str()));
+        // The decision must not depend on the load mode or memory-fit pass.
+        is_lazy = !is_external && lazy.add(tn.str(), cur, no_alloc ? nullptr : &require_weight(tn.str().c_str()));
     }
 
     ggml_tensor t_meta = *cur;
@@ -1469,7 +1525,7 @@ void llama_model_loader::init_mappings(bool prefetch, llama_mlocks * mlock_mmaps
             llama_mmap::ranges file_no_prefetch = lazy.for_file(idx);
             if (moe_direct_io) {
                 for (const auto & it : weights_map) {
-                    if (it.second.idx == idx && is_moe_expert_tensor(it.first)) {
+                    if (it.second.idx == idx && is_moe_expert_tensor(it.first) && (!stripped_experts || it.second.external)) {
                         file_no_prefetch.emplace_back(it.second.offs, it.second.offs + ggml_nbytes(it.second.tensor));
                     }
                 }
@@ -1744,6 +1800,20 @@ bool llama_model_loader::load_all_data(
 
         size_t n_size = ggml_nbytes(cur);
 
+        // Paged expert tensors are populated by the native pager after model
+        // construction. Skip their file payload in every load mode; for a
+        // stripped bundle their offsets intentionally lie beyond EOF.
+        const bool skip_expert_payload = stripped_experts
+            ? weight->external
+            : (use_mmap || (cur->buffer && ggml_backend_buffer_is_host(cur->buffer)));
+        const bool is_paged_expert = moe_direct_io && is_moe_expert_tensor(cur->name) &&
+            skip_expert_payload;
+        if (is_paged_expert) {
+            GGML_ASSERT(cur->buffer != nullptr || cur->data != nullptr);
+            size_done += n_size;
+            continue;
+        }
+
         const bool from_mapping = use_mmap || lazy.has(cur);
 
         if (from_mapping) {
@@ -1760,7 +1830,7 @@ bool llama_model_loader::load_all_data(
                 }
             }
 
-            const bool is_expert = moe_direct_io && is_moe_expert_tensor(cur->name);
+            const bool is_expert = moe_direct_io && is_moe_expert_tensor(cur->name) && (!stripped_experts || weight->external);
 
             if (check_tensors && !is_expert) {
                 validation_result.emplace_back(std::async(std::launch::async, [cur, data, n_size] {
@@ -1788,7 +1858,7 @@ bool llama_model_loader::load_all_data(
             const auto & file = files.at(weight->idx);
 
             if (ggml_backend_buffer_is_host(cur->buffer)) {
-                const bool is_expert = moe_direct_io && is_moe_expert_tensor(cur->name);
+                const bool is_expert = moe_direct_io && is_moe_expert_tensor(cur->name) && (!stripped_experts || weight->external);
                 if (!is_expert) {
                     file->seek(weight->offs, SEEK_SET);
                     file->read_raw(cur->data, n_size);

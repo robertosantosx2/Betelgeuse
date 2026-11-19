@@ -4,14 +4,14 @@ import json
 from pathlib import Path
 import tempfile
 import unittest
-
 from unittest import mock
+
 import numpy as np
+from gguf import GGUFReader, GGUFWriter
 
 spec = importlib.util.spec_from_file_location("moe_pack", Path(__file__).resolve().parents[1] / "tools/moe_pack.py")
 moe_pack = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(moe_pack)
-from gguf import GGUFReader, GGUFWriter
 
 
 class BundleHeader(GGUFReader):
@@ -113,7 +113,6 @@ class TestMoePack(unittest.TestCase):
                     padding = (-row["blob"]) % 4096
                     self.assertEqual(packed.read(padding), bytes(padding))
         self.assertEqual(moe_pack.verify_pack(self.model, self.output, True)["verified_experts"], 8)
-
 
     def write_ple(self):
         path = self.root / "ple.gguf"
