@@ -146,6 +146,20 @@ static bool verify_pack_index_rejections(moe_pager & pager, const char * experts
     }
     ok &= reject_index("wrong-tensor-type", bad_type);
 
+    std::vector<std::string> bad_source_offset = lines;
+    {
+        std::istringstream row(bad_source_offset[data_rows.front()]);
+        int layer, gu, dt;
+        int64_t base, blob;
+        uint64_t go, uo, doff;
+        if (!(row >> layer >> gu >> dt >> base >> blob >> go >> uo >> doff)) return false;
+        std::ostringstream replacement;
+        replacement << layer << " " << gu << " " << dt << " " << base << " " << blob
+                    << " " << (go + 1) << " " << uo << " " << doff;
+        bad_source_offset[data_rows.front()] = replacement.str();
+    }
+    ok &= reject_index("wrong-source-offset", bad_source_offset);
+
     std::vector<std::string> bad_range = lines;
     {
         std::istringstream row(bad_range[data_rows.front()]);
