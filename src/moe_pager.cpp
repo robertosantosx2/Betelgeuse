@@ -365,11 +365,19 @@ bool moe_pager::use_pack(const char * experts_bin, const char * index_txt, std::
             err = "negative source tensor offset in pack index";
             return false;
         }
-        (void) gate_source_off;
-        (void) up_source_off;
-        (void) down_source_off;
-
         if (il < 0 || il >= n_layer_) { err = "pack index layer out of range"; return false; }
+        const moe_expert_slice * source = slices(il, 0);
+        const uint64_t source_offsets[3] = {
+            source[0].off + source[0].pre,
+            source[1].off + source[1].pre,
+            source[2].off + source[2].pre,
+        };
+        if ((uint64_t) gate_source_off != source_offsets[0] ||
+                (uint64_t) up_source_off != source_offsets[1] ||
+                (uint64_t) down_source_off != source_offsets[2]) {
+            err = "pack index source tensor offsets do not match the GGUF";
+            return false;
+        }
         if (seen_layers[(size_t) il]) { err = "duplicate pack index layer"; return false; }
         if (base_signed < 0 || blob_signed <= 0) { err = "bad pack index offsets"; return false; }
 
