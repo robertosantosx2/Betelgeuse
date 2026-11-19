@@ -10,6 +10,7 @@
 #include <array>
 #include <cinttypes>
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
 #include <filesystem>
 #include <future>
@@ -738,6 +739,16 @@ llama_model_loader::llama_model_loader(
         llm_kv = LLM_KV(llm_arch_from_string(arch_name));
     }
 
+    // A trunk-only bundle deliberately keeps routed-expert tensor descriptors
+    // while moving their payloads out of the dense GGUF. Detect that state from
+    // the already-validated file bounds so the launch path cannot mistake the
+    // stripped dense file for a complete standalone model.
+    stripped_experts = std::any_of(weights_map.begin(), weights_map.end(),
+        [](const auto & entry) { return entry.second.external; });
+    if (stripped_experts) {
+        LLAMA_LOG_INFO("%s: detected external routed-expert payloads; native MoE pack is required\n", __func__);
+    }
+
     n_kv      = gguf_get_n_kv(metadata);
     n_tensors = weights_map.size();
 
@@ -1148,11 +1159,13 @@ bool llama_model_loader::lazy_read::add(const std::string & name, const ggml_ten
 struct ggml_tensor * llama_model_loader::create_tensor(
         const llama_hparams & hparams, const buft_list_t * buft_list_cpu, const buft_list_t * buft_list_input, const buft_list_t * buft_list_output,
         const buft_list_t * buft_list_layer, const LLM_TN_IMPL & tn, const std::initializer_list<int64_t> & ne, int flags) {
-    // set below, before buft_for_tensor() runs
+    // Set below, before buft_for_tensor() runs. Keep the source-payload
+    // classification independent from lazy-read selection.
     bool is_lazy = false;
+    bool is_external = false;
 
     auto ctx_for_buft = [&](ggml_backend_buffer_type_t buft) -> ggml_context * {
-        const ctx_key key { buft, is_lazy };
+        const ctx_key key { buft, is_lazy, is_external };
 
         auto it = ctx_map.find(key);
         if (it == ctx_map.end()) {
@@ -1371,9 +1384,14 @@ struct ggml_tensor * llama_model_loader::create_tensor(
         return NULL;
     }
 
-    if (flags & TENSOR_READ_LAZY) {
+    // Resolve the source weight for every real tensor, not only lazy tensors:
+    // external payloads must use a dedicated context with a dummy backend buffer.
+    const llama_tensor_weight & weight = require_weight(tn.str().c_str());
+    is_external = weight.external;
+
+    if ((flags & TENSOR_READ_LAZY) && !is_external) {
         // the decision must not depend on the load mode, or the memory-fit pass (no_alloc, no mmap)
-        is_lazy = lazy.add(tn.str(), cur, no_alloc ? nullptr : &require_weight(tn.str().c_str()));
+        is_lazy = lazy.add(tn.str(), cur, no_alloc ? nullptr : &weight);
     }
 
     ggml_tensor t_meta = *cur;
@@ -1445,6 +1463,17 @@ static bool is_moe_expert_tensor(const std::string & name) {
            name.find("_exps")    != std::string::npos;
 }
 
+// Only effective trunk experts are serviced by the pager, for mmap and non-mmap
+// load paths alike. NextN/MTP expert tensors remain ordinary dense-GGUF weights.
+static bool is_moe_paged_expert_tensor(const std::string & name, int n_layer) {
+    if (n_layer <= 0 || !is_moe_expert_tensor(name)) {
+        return false;
+    }
+    int layer = -1;
+    return std::sscanf(name.c_str(), "blk.%d.", &layer) == 1 &&
+        layer >= 0 && layer < n_layer;
+}
+
 void llama_model_loader::init_mappings(bool prefetch, llama_mlocks * mlock_mmaps) {
     // note: read_lazy also requires mmap; this condition make sure it's usable even when --load-mode is not set to mmap
     if (use_mmap || lazy.any()) {
@@ -1469,7 +1498,7 @@ void llama_model_loader::init_mappings(bool prefetch, llama_mlocks * mlock_mmaps
             llama_mmap::ranges file_no_prefetch = lazy.for_file(idx);
             if (moe_direct_io) {
                 for (const auto & it : weights_map) {
-                    if (it.second.idx == idx && is_moe_expert_tensor(it.first)) {
+                    if (it.second.idx == idx && !it.second.external && is_moe_paged_expert_tensor(it.first, moe_n_layer)) {
                         file_no_prefetch.emplace_back(it.second.offs, it.second.offs + ggml_nbytes(it.second.tensor));
                     }
                 }
@@ -1489,7 +1518,9 @@ void llama_model_loader::init_mappings(bool prefetch, llama_mlocks * mlock_mmaps
 
     // compute the total size of all tensors for progress reporting
     for (const auto & it : weights_map) {
-        size_data += ggml_nbytes(it.second.tensor);
+        if (!it.second.external) {
+            size_data += ggml_nbytes(it.second.tensor);
+        }
     }
 }
 
@@ -1735,6 +1766,10 @@ bool llama_model_loader::load_all_data(
             // this can happen with split experts models
             continue;
         }
+        if (weight->external) {
+            // The payload is supplied by the native expert pack, never by the stripped GGUF.
+            continue;
+        }
 
         if (progress_callback) {
             if (!progress_callback((float) size_done / size_data, progress_callback_user_data)) {
@@ -1760,7 +1795,7 @@ bool llama_model_loader::load_all_data(
                 }
             }
 
-            const bool is_expert = moe_direct_io && is_moe_expert_tensor(cur->name);
+            const bool is_expert = moe_direct_io && is_moe_paged_expert_tensor(cur->name, moe_n_layer);
 
             if (check_tensors && !is_expert) {
                 validation_result.emplace_back(std::async(std::launch::async, [cur, data, n_size] {
@@ -1788,7 +1823,7 @@ bool llama_model_loader::load_all_data(
             const auto & file = files.at(weight->idx);
 
             if (ggml_backend_buffer_is_host(cur->buffer)) {
-                const bool is_expert = moe_direct_io && is_moe_expert_tensor(cur->name);
+                const bool is_expert = moe_direct_io && is_moe_paged_expert_tensor(cur->name, moe_n_layer);
                 if (!is_expert) {
                     file->seek(weight->offs, SEEK_SET);
                     file->read_raw(cur->data, n_size);

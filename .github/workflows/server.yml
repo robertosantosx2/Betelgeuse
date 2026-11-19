@@ -59,7 +59,7 @@ concurrency:
 
 jobs:
   ubuntu:
-    runs-on: ubuntu-24.04-arm
+    runs-on: ubuntu-24.04
 
     steps:
       - name: Dependencies
@@ -74,7 +74,18 @@ jobs:
             curl \
             wget \
             language-pack-en \
-            libssl-dev
+            libssl-dev \
+            librsvg2-bin \
+            imagemagick \
+            liburing-dev
+
+      - name: Install CUDA Toolkit
+        uses: Jimver/cuda-toolkit@v0.2.35
+        with:
+          cuda: '13.2.0'
+          method: 'network'
+          sub-packages: '["nvcc", "cudart-dev"]'
+          non-cuda-sub-packages: '["libcublas-dev"]'
 
       - name: Clone
         id: checkout
@@ -94,7 +105,7 @@ jobs:
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN_CI }}
         with:
-          key: server-ubuntu-24.04-arm
+          key: server-ubuntu-24.04-x64
           folder: llama.cpp
           hf_bucket: ggml-org/cache
 
@@ -102,7 +113,11 @@ jobs:
         id: cmake_build
         run: |
           cmake -B build \
-            -DGGML_SCHED_NO_REALLOC=ON
+            -DLLAMA_BUILD_UI=OFF \
+            -DLLAMA_USE_PREBUILT_UI=OFF \
+            -DGGML_SCHED_NO_REALLOC=ON \
+            -DGGML_CUDA=ON \
+            -DCMAKE_CUDA_ARCHITECTURES=86
           cmake --build build --config Release -j $(nproc) --target llama-server
 
       - name: ccache-buckets-save
@@ -111,7 +126,7 @@ jobs:
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN_CACHE_OUTPUT }}
         with:
-          key: server-ubuntu-24.04-arm
+          key: server-ubuntu-24.04-x64
           folder: llama.cpp
           evict-old-files: 1d
           hf_bucket: ggml-org/cache
@@ -161,6 +176,9 @@ jobs:
       contents: read
 
     steps:
+      - name: Install SVG rasterizer
+        run: choco install rsvg-convert imagemagick --yes --no-progress
+
       - name: Clone
         id: checkout
         uses: actions/checkout@v6
@@ -180,6 +198,8 @@ jobs:
         shell: cmd
         run: |
           cmake -B build -G "Ninja Multi-Config" ^
+            -DLLAMA_BUILD_UI=OFF ^
+            -DLLAMA_USE_PREBUILT_UI=OFF ^
             -DCMAKE_TOOLCHAIN_FILE=cmake/x64-windows-llvm.cmake ^
             -DCMAKE_BUILD_TYPE=Release ^
             -DLLAMA_BUILD_BORINGSSL=ON ^

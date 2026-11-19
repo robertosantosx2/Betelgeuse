@@ -18,12 +18,15 @@
 #include <sstream>
 #include <cstdio>
 #include <cstdlib>
+#include <cerrno>
+#include <new>
 #include <cstring>
 #include <limits>
 #include <stdexcept>
 #include <fcntl.h>
 #include <unistd.h>
 #include <sys/mman.h>
+#include <sys/stat.h>
 #include <time.h>
 
 static double now_s() {
@@ -47,7 +50,12 @@ void moe_pager::ensure_dma_events() {
 }
 
 moe_pager::~moe_pager() {
-    if (ring_) { io_uring_queue_exit((struct io_uring *) ring_); ring_ = nullptr; }
+    if (ring_) {
+        struct io_uring * ring = (struct io_uring *) ring_;
+        io_uring_queue_exit(ring);
+        delete ring;
+        ring_ = nullptr;
+    }
     if (stage_) { cudaFreeHost(stage_); stage_ = nullptr; }
     if (cache_) {
         if (cache_registered_) {
@@ -58,11 +66,12 @@ moe_pager::~moe_pager() {
         }
         cache_ = nullptr;
     }
-        for (int sfd : fds_) {
+    for (int sfd : fds_) {
         if (sfd >= 0) close(sfd);
     }
     fds_.clear();
-    if (fd_ >= 0) { close(fd_); fd_ = -1; }
+    // fd_ is also owned by fds_ (the first shard); do not close it twice.
+    fd_ = -1;
     if (fd_pack_ >= 0) { close(fd_pack_); fd_pack_ = -1; }
     if (fd_pack_buf_ >= 0) { close(fd_pack_buf_); fd_pack_buf_ = -1; }
     if (fd_warm_ >= 0) { close(fd_warm_); fd_warm_ = -1; }
@@ -146,6 +155,7 @@ long moe_pager::warm_pack_ranges(const uint64_t * offs, const size_t * lens, siz
 }
 
 bool moe_pager::init(const char * gguf_path, int n_layer, int n_expert, int n_used, std::string & err, int n_staging) {
+    if (n_layer <= 0 || n_expert <= 0 || n_used <= 0 || n_used > n_expert) { err = "invalid MoE dimensions"; return false; }
     if (n_staging <= 0 || n_staging > 384) { err = "invalid staging slot count"; return false; }
     path_ = gguf_path;
     n_layer_ = n_layer; n_expert_ = n_expert; n_used_ = n_used;
@@ -154,8 +164,10 @@ bool moe_pager::init(const char * gguf_path, int n_layer, int n_expert, int n_us
     struct gguf_context * gctx = gguf_init_from_file(gguf_path, gp);
     if (!gctx) { err = "gguf_init_from_file failed"; return false; }
 
-    idx_.assign((size_t) n_layer * n_expert * 3, moe_expert_slice{-1, 0, 0, 0});
+    if ((size_t) n_layer > SIZE_MAX / (size_t) n_expert / 3) { err = "MoE index dimensions overflow"; gguf_free(gctx); return false; }
+    idx_.assign((size_t) n_layer * (size_t) n_expert * 3, moe_expert_slice{-1, 0, 0, 0});
     role_bytes_.assign((size_t) n_layer * 3, 0);
+    role_types_.assign((size_t) n_layer * 3, -1);
     size_t per_expert_bytes = 0;
 
     struct shard_desc {
@@ -201,7 +213,14 @@ bool moe_pager::init(const char * gguf_path, int n_layer, int n_expert, int n_us
             if (sfd_buf >= 0) posix_fadvise(sfd_buf, 0, 0, POSIX_FADV_RANDOM);
             int sfd = open(spath.c_str(), O_RDONLY | O_DIRECT);
             if (sfd < 0) sfd = sfd_buf;
-            if (sfd >= 0) fds_.push_back(sfd);
+            if (sfd < 0) {
+                gguf_free(sctx);
+                err = "open split GGUF shard failed";
+                for (auto & shd : shards) if (shd.owned) gguf_free(shd.ctx);
+                gguf_free(gctx);
+                return false;
+            }
+            fds_.push_back(sfd);
             if (sfd_buf >= 0 && sfd_buf != sfd) fds_.push_back(sfd_buf);
             shards.push_back({spath, sctx, (int64_t) gguf_get_data_offset(sctx), sfd_buf >= 0 ? sfd_buf : sfd, sfd_buf, true});
         }
@@ -219,6 +238,7 @@ bool moe_pager::init(const char * gguf_path, int n_layer, int n_expert, int n_us
                 const int64_t tid = gguf_find_tensor(sh.ctx, role_names[r]);
                 if (tid >= 0) {
                     const size_t tbytes = (size_t) gguf_get_tensor_size(sh.ctx, tid);
+                    role_types_[(size_t) il * 3 + (size_t) r] = (int) gguf_get_tensor_type(sh.ctx, tid);
                     if (tbytes % (size_t) n_expert) {
                         err = "expert tensor size not divisible by n_expert";
                         for (auto & shd : shards) if (shd.owned) gguf_free(shd.ctx);
@@ -274,74 +294,173 @@ bool moe_pager::init(const char * gguf_path, int n_layer, int n_expert, int n_us
     for (int i = n_staging - 1; i >= (int) demand_stages_; i--) free_stage_.push_back(i);
     for (int i = (int) demand_stages_ - 1; i >= 0; i--) free_demand_.push_back(i);
 
-    ring_ = new io_uring();
-    if (io_uring_queue_init(256, (struct io_uring *) ring_, 0) < 0) {
-        err = "io_uring_queue_init failed"; return false;
+    struct io_uring * ring = new (std::nothrow) io_uring();
+    if (!ring) { err = "io_uring allocation failed"; return false; }
+    if (io_uring_queue_init(256, ring, 0) < 0) {
+        delete ring;
+        err = "io_uring_queue_init failed";
+        return false;
     }
+    ring_ = ring;
     return true;
 }
 
 bool moe_pager::use_pack(const char * experts_bin, const char * index_txt, std::string & err) {
     if (n_layer_ <= 0 || n_expert_ <= 0) { err = "pager not indexed"; return false; }
     if (pack_mode_) { err = "pack already active"; return false; }
+    if (!experts_bin || !index_txt) { err = "pack paths must not be null"; return false; }
+    if (fd_pack_ >= 0 && !pack_path_.empty() && pack_path_ != experts_bin) {
+        err = "a different expert pack is already open";
+        return false;
+    }
+
     std::ifstream f(index_txt);
     if (!f) { err = "cannot open pack index"; return false; }
-    if (fd_pack_ < 0) {
-        fd_pack_ = open(experts_bin, O_RDONLY | O_DIRECT);
-        if (fd_pack_ < 0) { err = "open experts.bin O_DIRECT failed"; return false; }
-        pack_path_ = experts_bin;
+
+    struct pack_fd_guard {
+        int fd;
+        bool owned;
+        ~pack_fd_guard() { if (owned && fd >= 0) close(fd); }
+    };
+    const bool opened_here = fd_pack_ < 0;
+    const int candidate_fd = opened_here ? open(experts_bin, O_RDONLY | O_DIRECT) : fd_pack_;
+    pack_fd_guard fd_guard{candidate_fd, opened_here};
+    if (candidate_fd < 0) { err = "open experts.bin O_DIRECT failed"; return false; }
+
+    struct stat pack_stat;
+    if (fstat(candidate_fd, &pack_stat) != 0 || pack_stat.st_size < 0 || !S_ISREG(pack_stat.st_mode)) {
+        err = "experts.bin must be a regular file with a readable size";
+        return false;
     }
-    bsrc_.assign((size_t) n_layer_ * n_expert_ * 3, 0);
-    // build into temporaries: a rejected pack must leave the GGUF index intact
+    const uint64_t pack_size = (uint64_t) pack_stat.st_size;
+    if ((size_t) n_layer_ > SIZE_MAX / (size_t) n_expert_ / 3) {
+        err = "pack index dimensions overflow";
+        return false;
+    }
+    const size_t n_entries = (size_t) n_layer_ * (size_t) n_expert_ * 3;
+
+    // Build into temporaries: a rejected pack leaves the GGUF index and the
+    // pager's active file descriptors untouched.
     std::vector<moe_expert_slice> new_idx = idx_;
-    std::vector<uint32_t>         new_bsrc(n_layer_ * n_expert_ * 3, 0);
+    std::vector<uint32_t> new_bsrc(n_entries, 0);
+    std::vector<char> seen_layers((size_t) n_layer_, 0);
     size_t max_blob = 0;
     std::string line;
     int rows = 0;
     while (std::getline(f, line)) {
-        if (line.empty() || line[0] == '#') continue;
+        const size_t first = line.find_first_not_of(" \t\r");
+        if (first == std::string::npos || line[first] == '#') continue;
+
         std::istringstream is(line);
-        int il, gu, dt;
-        long long base = 0, blob = 0;
-        if (!(is >> il >> gu >> dt >> base >> blob)) { err = "bad pack index line"; return false; }
-        if (base < 0 || blob <= 0) { err = "bad pack index offsets"; return false; }
+        int il = -1, gu = -1, dt = -1;
+        int64_t base_signed = -1, blob_signed = -1;
+        int64_t gate_source_off = -1, up_source_off = -1, down_source_off = -1;
+        std::string trailing;
+        if (!(is >> il >> gu >> dt >> base_signed >> blob_signed
+                 >> gate_source_off >> up_source_off >> down_source_off) || (is >> trailing)) {
+            err = "bad native-experts-v3 index line";
+            return false;
+        }
+        if (gate_source_off < 0 || up_source_off < 0 || down_source_off < 0) {
+            err = "negative source tensor offset in pack index";
+            return false;
+        }
         if (il < 0 || il >= n_layer_) { err = "pack index layer out of range"; return false; }
-        const size_t g = role_bytes_[(size_t) il * 3 + 0];
-        const size_t u = role_bytes_[(size_t) il * 3 + 1];
-        const size_t d = role_bytes_[(size_t) il * 3 + 2];
-        if (g + u + d != (size_t) blob) {
+        const moe_expert_slice * source = slices(il, 0);
+        const uint64_t source_offsets[3] = {
+            source[0].off + source[0].pre,
+            source[1].off + source[1].pre,
+            source[2].off + source[2].pre,
+        };
+        if ((uint64_t) gate_source_off != source_offsets[0] ||
+                (uint64_t) up_source_off != source_offsets[1] ||
+                (uint64_t) down_source_off != source_offsets[2]) {
+            err = "pack index source tensor offsets do not match the GGUF";
+            return false;
+        }
+        if (seen_layers[(size_t) il]) { err = "duplicate pack index layer"; return false; }
+        if (base_signed < 0 || blob_signed <= 0) { err = "bad pack index offsets"; return false; }
+
+        const size_t layer_role = (size_t) il * 3;
+        const size_t g = role_bytes_[layer_role + 0];
+        const size_t u = role_bytes_[layer_role + 1];
+        const size_t d = role_bytes_[layer_role + 2];
+        if ((uint64_t) blob_signed > (uint64_t) SIZE_MAX ||
+            g > SIZE_MAX - u || g + u > SIZE_MAX - d || g + u + d != (size_t) blob_signed) {
             err = "pack blob_bytes do not match the GGUF gate|up|down sizes";
             return false;
         }
+        if (role_types_.size() < (size_t) n_layer_ * 3 ||
+            gu != role_types_[layer_role + 0] ||
+            gu != role_types_[layer_role + 1] ||
+            dt != role_types_[layer_role + 2]) {
+            err = "pack index tensor types do not match the GGUF gate|up|down types";
+            return false;
+        }
+
+        const uint64_t base = (uint64_t) base_signed;
+        const uint64_t blob = (uint64_t) blob_signed;
+        if (base > pack_size || blob > (pack_size - base) / (uint64_t) n_expert_) {
+            err = "pack layer range exceeds experts.bin";
+            return false;
+        }
+        if (blob > (uint64_t) UINT32_MAX - (uint64_t) ALIGN) {
+            err = "pack expert blob exceeds pager slice limits";
+            return false;
+        }
+
         for (int e = 0; e < n_expert_; e++) {
-            const uint64_t fbo  = (uint64_t) base + (uint64_t) e * (uint64_t) blob;
-            const uint64_t pre  = (ALIGN - (fbo % ALIGN)) % ALIGN;
-            const size_t   alen = (size_t) (((blob + pre + ALIGN - 1) / ALIGN) * ALIGN);
-            moe_expert_slice * s = &new_idx[((size_t) il * n_expert_ + e) * 3];
-            s[0].fd  = fd_pack_;
-            s[0].off = fbo - pre;
-            s[0].len = (uint32_t) alen;
+            const uint64_t fbo = base + (uint64_t) e * blob;
+            const uint64_t pre = ((uint64_t) ALIGN - (fbo % (uint64_t) ALIGN)) % (uint64_t) ALIGN;
+            const uint64_t aligned_len = ((blob + pre + (uint64_t) ALIGN - 1) / (uint64_t) ALIGN) * (uint64_t) ALIGN;
+            const uint64_t read_off = fbo - pre;
+            if (aligned_len > UINT32_MAX || read_off > pack_size || aligned_len > pack_size - read_off ||
+                read_off > (uint64_t) std::numeric_limits<off_t>::max()) {
+                err = "aligned pack read exceeds experts.bin or pager limits";
+                return false;
+            }
+            if (g > (size_t) (UINT32_MAX - pre) ||
+                u > (size_t) (UINT32_MAX - pre - g)) {
+                err = "pack source offsets exceed pager limits";
+                return false;
+            }
+
+            moe_expert_slice * s = &new_idx[((size_t) il * (size_t) n_expert_ + (size_t) e) * 3];
+            s[0].fd  = candidate_fd;
+            s[0].fd_buf = -1;
+            s[0].off = read_off;
+            s[0].len = (uint32_t) aligned_len;
             s[0].pre = (uint32_t) pre;
             s[1] = s[2] = moe_expert_slice{0, 0, 0};
-            uint32_t * b = &new_bsrc[((size_t) il * n_expert_ + e) * 3];
+
+            uint32_t * b = &new_bsrc[((size_t) il * (size_t) n_expert_ + (size_t) e) * 3];
             b[0] = (uint32_t) pre;
             b[1] = (uint32_t) (pre + g);
             b[2] = (uint32_t) (pre + g + u);
-            if (pre + blob > alen) { err = "pack blob read underruns"; return false; }
-            max_blob = std::max(max_blob, alen);
+            max_blob = std::max(max_blob, (size_t) aligned_len);
         }
+        seen_layers[(size_t) il] = 1;
         rows++;
     }
-    if (rows != n_layer_) {
+    if (f.bad()) { err = "error reading native expert index"; return false; }
+    if (rows != n_layer_ ||
+        std::find(seen_layers.begin(), seen_layers.end(), (char) 0) != seen_layers.end()) {
         char m[128];
-        snprintf(m, sizeof m, "pack index has %d rows, expected %d", rows, n_layer_);
+        snprintf(m, sizeof m, "pack index has %d unique rows, expected %d", rows, n_layer_);
         err = m;
         return false;
     }
+    if (max_blob == 0) { err = "pack index contains no expert payload"; return false; }
+
     idx_.swap(new_idx);
     bsrc_.swap(new_bsrc);
-    pack_mode_ = true;
     stage_bytes_ = max_blob;
+    if (opened_here) {
+        fd_pack_ = candidate_fd;
+        fd_guard.owned = false;
+    }
+    pack_path_ = experts_bin;
+    pack_mode_ = true;
     return true;
 }
 
@@ -386,9 +505,14 @@ int moe_pager::submit_(int key, bool demand) {
     for (int r = 0; r < nread; r++) {
         struct io_uring_sqe * sqe = io_uring_get_sqe((struct io_uring *) ring_);
         while (!sqe) {
-            io_uring_submit((struct io_uring *) ring_);
+            int submitted = io_uring_submit((struct io_uring *) ring_);
+            if (submitted == -EINTR) continue;
+            if (submitted <= 0) GGML_ABORT("MoE pager could not submit queued reads: %d", submitted);
             struct io_uring_cqe * cqe = nullptr;
-            if (io_uring_wait_cqe((struct io_uring *) ring_, &cqe) == 0) {
+            int wait_status;
+            do { wait_status = io_uring_wait_cqe((struct io_uring *) ring_, &cqe); } while (wait_status == -EINTR);
+            if (wait_status < 0) GGML_ABORT("MoE pager completion wait failed: %d", wait_status);
+            if (cqe) {
                 const uint64_t ud = cqe->user_data;
                 const int res = cqe->res;
                 io_uring_cqe_seen((struct io_uring *) ring_, cqe);
@@ -411,8 +535,11 @@ int moe_pager::submit_(int key, bool demand) {
     Req q; q.il = il; q.e = e; q.stage = st; q.done = pending; q.used = true; q.demand = demand;
     q.got[0] = got_self[0]; q.got[1] = got_self[1]; q.got[2] = got_self[2];
     reqs_.push_back(q);
-    int nsub = io_uring_submit((struct io_uring *) ring_);
-    if (nsub <= 0) { fprintf(stderr, "pager submit failed il=%d e=%d nsub=%d\n", il, e, nsub); }
+    while (io_uring_sq_ready((struct io_uring *) ring_) > 0) {
+        const int nsub = io_uring_submit((struct io_uring *) ring_);
+        if (nsub == -EINTR) continue;
+        if (nsub <= 0) GGML_ABORT("MoE pager submission failed il=%d e=%d: %d", il, e, nsub);
+    }
     if (pack_mode_) { io_ops_ += 1; io_bytes_ += (long) boff; n_pack_reads_ += 1; }
     else            { io_ops_ += 3; io_bytes_ += (long) boff; n_gguf_reads_ += 3; }
     return (int) reqs_.size() - 1;
@@ -428,7 +555,9 @@ bool moe_pager::wait_ok_(int r) {
     while (reqs_[r].done < need) {
         had_wait = true;
         struct io_uring_cqe * cqe = nullptr;
-        if (io_uring_wait_cqe((struct io_uring *) ring_, &cqe) < 0) break;
+        const int wait_status = io_uring_wait_cqe((struct io_uring *) ring_, &cqe);
+        if (wait_status == -EINTR) continue;
+        if (wait_status < 0) break;
         const uint64_t ud = cqe->user_data;
         const int res = cqe->res;
         io_uring_cqe_seen((struct io_uring *) ring_, cqe);
@@ -639,6 +768,7 @@ void moe_pager::cache_remove(int il, int expert) {
 }
 
 bool moe_pager::prefetch(int il, int e) {
+    if (il < 0 || il >= n_layer_ || e < 0 || e >= n_expert_) return false;
     std::lock_guard<std::mutex> lock(mtx_);
     const int key = il * n_expert_ + e;
     if (find_(key) >= 0) return true;
@@ -650,7 +780,14 @@ bool moe_pager::prefetch(int il, int e) {
 bool moe_pager::fetch_direct_io(int il, int e, void * dst_gate, size_t gate_bytes,
                                 void * dst_up, size_t up_bytes,
                                 void * dst_down, size_t down_bytes, void * stream, int slot_idx) {
-    if (il < 0 || il >= n_layer_ || e < 0 || e >= n_expert_) return false;
+    if (il < 0 || il >= n_layer_ || e < 0 || e >= n_expert_ ||
+            !dst_gate || !dst_up || !dst_down ||
+            gate_bytes != role_bytes_[(size_t) il * 3 + 0] ||
+            up_bytes != role_bytes_[(size_t) il * 3 + 1] ||
+            down_bytes != role_bytes_[(size_t) il * 3 + 2]) {
+        return false;
+    }
+    (void) stream;
     const moe_expert_slice * s = slices(il, e);
     const int st = (slot_idx >= 0 ? slot_idx : 0) % (demand_stages_ > 0 ? demand_stages_ : 64);
     char * src = stage_ + (size_t) st * stage_bytes_;
@@ -687,8 +824,11 @@ bool moe_pager::fetch_direct_io(int il, int e, void * dst_gate, size_t gate_byte
         const size_t avail = pack_mode_
             ? role_bytes_[(size_t) il * 3 + (size_t) k]
             : ((size_t) s[k].len - skip);
-        cudaMemcpy(dst[k], src + (pack_mode_ ? 0 : off) + skip,
-                   std::min(want[k], avail), cudaMemcpyHostToDevice);
+        if (want[k] > avail || cudaMemcpy(dst[k], src + (pack_mode_ ? 0 : off) + skip,
+                   want[k], cudaMemcpyHostToDevice) != cudaSuccess) {
+            n_io_fail_++;
+            return false;
+        }
         if (!pack_mode_) off += s[k].len;
     }
     return true;
@@ -704,6 +844,13 @@ bool moe_pager::commit(int il, int e, void * dst_gate, size_t gate_bytes,
 bool moe_pager::commit_locked(int il, int e, void * dst_gate, size_t gate_bytes,
                                   void * dst_up,     size_t up_bytes,
                                   void * dst_down,   size_t down_bytes) {
+    if (il < 0 || il >= n_layer_ || e < 0 || e >= n_expert_ ||
+            !dst_gate || !dst_up || !dst_down ||
+            gate_bytes != role_bytes_[(size_t) il * 3 + 0] ||
+            up_bytes != role_bytes_[(size_t) il * 3 + 1] ||
+            down_bytes != role_bytes_[(size_t) il * 3 + 2]) {
+        return false;
+    }
     const int key = il * n_expert_ + e;
     cudaStream_t ws = (cudaStream_t) worker_stream();
     if (!ws) {
@@ -724,8 +871,11 @@ bool moe_pager::commit_locked(int il, int e, void * dst_gate, size_t gate_bytes,
             size_t cwant[3] = { gate_bytes, up_bytes, down_bytes };
             for (int k = 0; k < 3; k++) {
                 const size_t cav = role_bytes_[(size_t) il * 3 + (size_t) k];
-                cudaMemcpy(cdst[k], csrc + coff, std::min(cwant[k], cav), cudaMemcpyHostToDevice);
-                dma_bytes_ += std::min(cwant[k], cav);
+                if (cwant[k] > cav || cudaMemcpy(cdst[k], csrc + coff, cwant[k], cudaMemcpyHostToDevice) != cudaSuccess) {
+                    n_io_fail_++;
+                    return false;
+                }
+                dma_bytes_ += cwant[k];
                 coff += cav;
             }
             cache_stamp_[(size_t) cslot] = ++cache_tick_;
@@ -762,9 +912,12 @@ bool moe_pager::commit_locked(int il, int e, void * dst_gate, size_t gate_bytes,
         const size_t avail = pack_mode_
             ? role_bytes_[(size_t) il * 3 + (size_t) k]
             : ((size_t) s[k].len - skip);
-        cudaMemcpy(dst[k], src + (pack_mode_ ? 0 : off) + skip,
-                   std::min(want[k], avail), cudaMemcpyHostToDevice);
-        dma_bytes_ += std::min(want[k], avail);
+        if (want[k] > avail || cudaMemcpy(dst[k], src + (pack_mode_ ? 0 : off) + skip,
+                   want[k], cudaMemcpyHostToDevice) != cudaSuccess) {
+            n_io_fail_++;
+            return false;
+        }
+        dma_bytes_ += want[k];
         if (!pack_mode_) off += s[k].len;
     }
 
@@ -1110,6 +1263,7 @@ bool moe_pager::fetch_batch(int il, const moe_batch_target * targets, int n_targ
     }
     while (io_uring_sq_ready(ring) > 0) {
         const int submitted = io_uring_submit(ring);
+        if (submitted == -EINTR) continue;
         if (submitted <= 0) GGML_ABORT("MoE batch submission failed: %d", submitted);
     }
 

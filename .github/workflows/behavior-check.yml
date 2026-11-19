@@ -49,7 +49,7 @@ env:
 
 jobs:
   ubuntu:
-    runs-on: ubuntu-26.04-arm
+    runs-on: ubuntu-24.04
 
     steps:
       - name: Clone
@@ -66,7 +66,15 @@ jobs:
         id: build_depends
         run: |
           sudo apt update
-          sudo apt install -y build-essential libssl-dev git-lfs libjpeg-dev python3 python3-venv python3-pip
+          sudo apt install -y build-essential libssl-dev git-lfs libjpeg-dev librsvg2-bin imagemagick python3 python3-venv python3-pip liburing-dev
+
+      - name: Install CUDA Toolkit
+        uses: Jimver/cuda-toolkit@v0.2.35
+        with:
+          cuda: '13.2.0'
+          method: 'network'
+          sub-packages: '["nvcc", "cudart-dev"]'
+          non-cuda-sub-packages: '["libcublas-dev"]'
 
       - name: Python Dependencies
         id: python_depends
@@ -80,7 +88,7 @@ jobs:
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN_CI }}
         with:
-          key: behavior-check-ubuntu-26.04-arm
+          key: behavior-check-ubuntu-24.04-x64
           folder: llama.cpp
           hf_bucket: ggml-org/cache
 
@@ -88,9 +96,13 @@ jobs:
         id: cmake_build
         run: |
           cmake -B build \
+            -DLLAMA_BUILD_UI=OFF \
+            -DLLAMA_USE_PREBUILT_UI=OFF \
             -DGGML_NATIVE=OFF \
             -DGGML_BACKEND_DL=OFF \
-            -DLLAMA_FATAL_WARNINGS=ON
+            -DLLAMA_FATAL_WARNINGS=ON \
+            -DGGML_CUDA=ON \
+            -DCMAKE_CUDA_ARCHITECTURES=86
           time cmake --build build --config Release -j $(nproc)
 
       - name: ccache-buckets-save
@@ -99,7 +111,7 @@ jobs:
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN_CACHE_OUTPUT }}
         with:
-          key: behavior-check-ubuntu-26.04-arm
+          key: behavior-check-ubuntu-24.04-x64
           folder: llama.cpp
           evict-old-files: 1d
           hf_bucket: ggml-org/cache
@@ -121,6 +133,9 @@ jobs:
       contents: read
 
     steps:
+      - name: Install SVG rasterizer
+        run: choco install rsvg-convert imagemagick --yes --no-progress
+
       - name: Clone
         id: checkout
         uses: actions/checkout@v6
@@ -146,6 +161,8 @@ jobs:
         run: |
           call "C:\Program Files\Microsoft Visual Studio\18\Enterprise\VC\Auxiliary\Build\vcvarsall.bat" x64
           cmake -B build -G "Ninja Multi-Config" ^
+            -DLLAMA_BUILD_UI=OFF ^
+            -DLLAMA_USE_PREBUILT_UI=OFF ^
             -DCMAKE_TOOLCHAIN_FILE=cmake/x64-windows-llvm.cmake ^
             -DCMAKE_BUILD_TYPE=Release ^
             -DGGML_NATIVE=OFF ^

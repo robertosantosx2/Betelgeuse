@@ -53,6 +53,11 @@ jobs:
     runs-on: ubuntu-24.04-arm
 
     steps:
+      - name: Build Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y librsvg2-bin imagemagick
+
       - name: Clone
         id: checkout
         uses: actions/checkout@v6
@@ -95,6 +100,8 @@ jobs:
             -G "Ninja" \
             -DCMAKE_BUILD_TYPE=Release \
             -DGGML_WEBGPU=ON \
+            -DLLAMA_BUILD_UI=OFF \
+            -DLLAMA_USE_PREBUILT_UI=OFF \
             -DGGML_OPENMP=OFF \
             -DLLAMA_OPENSSL=OFF \
             -DEMDAWNWEBGPU_DIR=emdawnwebgpu_pkg

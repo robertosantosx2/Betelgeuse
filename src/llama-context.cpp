@@ -3371,6 +3371,13 @@ llama_context::llama_context(
         }
 
         
+        // A stripped dense GGUF has no usable routed-expert payloads. Never
+        // fall back to reads from that file if pager setup or pack activation fails.
+        if (model.stripped_experts &&
+                (!cparams.moe_direct_io || !cparams.moe_gguf_path || !cparams.moe_pack_dir)) {
+            throw std::runtime_error("stripped expert model requires --moe-direct-io and a valid --moe-pack-dir");
+        }
+
         if (cparams.moe_direct_io && cparams.moe_gguf_path && hparams.dsv4_hc_mult > 0) {
             moe_init_ring();
         }
@@ -3384,6 +3391,9 @@ llama_context::llama_context(
 
             std::string perr;
             if (!pager.init(cparams.moe_gguf_path, n_layer, n_exp, n_used, perr)) {
+                if (model.stripped_experts) {
+                    throw std::runtime_error("cannot initialize pager for stripped expert model: " + perr);
+                }
                 LLAMA_LOG_WARN("%s: moe_direct_io OFF: %s\n", __func__, perr.c_str());
             } else {
                 if (cparams.moe_pack_dir) {
@@ -3392,6 +3402,9 @@ llama_context::llama_context(
                     std::string idx = dir + "/native_experts.txt";
                     std::string e2;
                     if (!pager.use_pack(bin.c_str(), idx.c_str(), e2)) {
+                        if (model.stripped_experts) {
+                            throw std::runtime_error("cannot activate native expert pack for stripped model: " + e2);
+                        }
                         LLAMA_LOG_WARN("%s: moe pack OFF: %s\n", __func__, e2.c_str());
                     } else {
                         LLAMA_LOG_INFO("%s: moe pack ON: one blob read per expert (%d layers x %d experts)\n",
@@ -3548,6 +3561,28 @@ llama_context::llama_context(
                     }
                 }
             }
+        }
+
+        // A stripped model is valid only when the native pack is active and
+        // the runtime has built its complete expert staging pool. Never let a
+        // partial initialization fall through to the zero sentinel or dense
+        // GGUF expert tensors.
+        if (model.stripped_experts && !pager.pack_mode()) {
+            throw std::runtime_error("stripped expert model has no active native expert pack");
+        }
+        if (model.stripped_experts && !moe_ready) {
+            // Construction is about to throw, so llama_context's destructor
+            // will not run. Release any partially created pool resources here.
+            if (moe.buf) {
+                ggml_backend_buffer_free(moe.buf);
+                moe.buf = nullptr;
+            }
+            if (moe.ctx) {
+                ggml_free(moe.ctx);
+                moe.ctx = nullptr;
+            }
+            moe.buf_bytes = 0;
+            throw std::runtime_error("stripped expert model MoE pool initialization failed");
         }
 
         if (cparams.moe_cache_size > 0) {
@@ -8052,6 +8087,9 @@ int llama_context::moe_page_pinned(int il, int e, const bool * pinned) {
     }
     if (slot < 0) {
         moe.n_page_fail++;
+        if (model.stripped_experts) {
+            throw std::runtime_error("stripped expert model has no free slot for a routed expert");
+        }
         return -1;
     }
 
@@ -8065,6 +8103,9 @@ int llama_context::moe_page_pinned(int il, int e, const bool * pinned) {
                      (char *) moe.pool_up[il]->data   + (size_t) local * u_slot, u_slot,
                      (char *) moe.pool_down[il]->data + (size_t) local * d_slot, d_slot)) {
         moe.n_page_fail++;
+        if (model.stripped_experts) {
+            throw std::runtime_error("native expert pager read failed for a stripped model");
+        }
         return -1;
     }
     if (moe.count_freq) { moe.slot_freq[(size_t) slot]++; moe.lru.miss((size_t) slot); }
@@ -8252,7 +8293,12 @@ void llama_context::moe_page_batch_sorted(int il, const int32_t * sel, int n) {
         const int32_t e = uniq[k];
         if (moe.slot_of[(size_t) il * n_exp + e] >= 0) continue;
         const size_t v = moe.lru.victim((const char *) pinned.data(), (size_t) base, (size_t) s_pl);
-        if (v == (size_t) -1) continue;
+        if (v == (size_t) -1) {
+            if (model.stripped_experts) {
+                throw std::runtime_error("stripped expert model exhausted its resident expert slots");
+            }
+            continue;
+        }
         int slot = (int) v;
         pinned[(size_t) slot - (size_t) base] = 1;
 
@@ -8273,12 +8319,16 @@ void llama_context::moe_page_batch_sorted(int il, const int32_t * sel, int n) {
         for (size_t i = 0; i < batch_targets.size(); ++i) {
             int slot = target_slots[i];
             int e = batch_targets[i].expert;
+            const int local = slot - base;
             if (!this->pager.fetch_direct_io(il, e,
-                (char *) moe.pool_gate[il]->data + (size_t) slot * g_slot, g_slot,
-                (char *) moe.pool_up[il]->data   + (size_t) slot * u_slot, u_slot,
-                (char *) moe.pool_down[il]->data + (size_t) slot * d_slot, d_slot,
-                nullptr, slot)) {
+                (char *) moe.pool_gate[il]->data + (size_t) local * g_slot, g_slot,
+                (char *) moe.pool_up[il]->data   + (size_t) local * u_slot, u_slot,
+                (char *) moe.pool_down[il]->data + (size_t) local * d_slot, d_slot,
+                nullptr, local)) {
                 moe.prefill_miss++;
+                if (model.stripped_experts) {
+                    throw std::runtime_error("native direct-I/O expert read failed during stripped-model prefill");
+                }
                 continue;
             }
             moe.prefill_miss++;
@@ -8616,12 +8666,14 @@ void llama_context::moe_adapt_run() {
             const int slot = moe.adapt_pend_e[(size_t) il * n_exp + e];
             if (slot < 0) continue;
             moe.adapt_pend_e[(size_t) il * n_exp + e] = -1;
-            const int base  = il * s_pl;                 // adapt_pend_e holds a
-            const int local = slot - base;                // GLOBAL slot index
+            const int base  = moe_get_layer_base_slot(il, moe.n_layer);
+            const int local = slot - base;
             if (local < 0 || local >= s_pl) continue;
-            const size_t g_slot = ggml_nbytes(moe.pool_gate[il]) / (size_t) std::max(1, moe.n_slots);
-            const size_t u_slot = ggml_nbytes(moe.pool_up[il])   / (size_t) std::max(1, moe.n_slots);
-            const size_t d_slot = ggml_nbytes(moe.pool_down[il]) / (size_t) std::max(1, moe.n_slots);
+            const int layer_slots = moe_get_layer_slots(il, moe.n_layer);
+            const size_t slot_count = (size_t) layer_slots + (moe.sentinel_slot ? 1u : 0u);
+            const size_t g_slot = ggml_nbytes(moe.pool_gate[il]) / slot_count;
+            const size_t u_slot = ggml_nbytes(moe.pool_up[il])   / slot_count;
+            const size_t d_slot = ggml_nbytes(moe.pool_down[il]) / slot_count;
             if (!pager.commit(il, e,
                     (char *) moe.pool_gate[il]->data + (size_t) local * g_slot, g_slot,
                     (char *) moe.pool_up[il]->data   + (size_t) local * u_slot, u_slot,
@@ -8681,7 +8733,8 @@ void llama_context::moe_adapt_run() {
             if (c_score <= v_score) continue;
             // reserve the victim slot until the swap lands: freeing it here would
             // let the demand path reassign it before the commit DMA arrives
-            moe.adapt_pend_e[lb + cand[i].second] = base + victim_slot;   // global
+            moe.adapt_pend_e[lb + cand[i].second] =
+                moe_get_layer_base_slot(il, moe.n_layer) + victim_slot;
             if (pager.prefetch(il, cand[i].second)) moe.adapt_swaps++;
         }
     }
