@@ -8308,11 +8308,12 @@ void llama_context::moe_page_batch_sorted(int il, const int32_t * sel, int n) {
         for (size_t i = 0; i < batch_targets.size(); ++i) {
             int slot = target_slots[i];
             int e = batch_targets[i].expert;
+            const int local = slot - base;
             if (!this->pager.fetch_direct_io(il, e,
-                (char *) moe.pool_gate[il]->data + (size_t) slot * g_slot, g_slot,
-                (char *) moe.pool_up[il]->data   + (size_t) slot * u_slot, u_slot,
-                (char *) moe.pool_down[il]->data + (size_t) slot * d_slot, d_slot,
-                nullptr, slot)) {
+                (char *) moe.pool_gate[il]->data + (size_t) local * g_slot, g_slot,
+                (char *) moe.pool_up[il]->data   + (size_t) local * u_slot, u_slot,
+                (char *) moe.pool_down[il]->data + (size_t) local * d_slot, d_slot,
+                nullptr, local)) {
                 moe.prefill_miss++;
                 if (model.stripped_experts) {
                     throw std::runtime_error("native direct-I/O expert read failed during stripped-model prefill");
